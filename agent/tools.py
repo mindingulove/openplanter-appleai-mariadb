@@ -46,6 +46,10 @@ class WorkspaceTools:
 
     def _get_db_conn(self, database: str | None = None) -> Any:
         import pymysql
+        # Ensure each thread has its own connection (pymysql is not thread-safe)
+        if not hasattr(self._scope_local, "db_conn"):
+            self._scope_local.db_conn = None
+
         db_name = database or self.mariadb_database
         params = {
             "host": self.mariadb_host,
@@ -54,21 +58,23 @@ class WorkspaceTools:
             "password": self.mariadb_password,
             "database": db_name,
         }
-        if self._db_conn and self._db_params == params:
+        
+        conn = self._scope_local.db_conn
+        if conn and self._db_params == params:
             try:
-                self._db_conn.ping(reconnect=True)
-                return self._db_conn
+                conn.ping(reconnect=True)
+                return conn
             except Exception:
                 pass
         
-        conn = pymysql.connect(
+        new_conn = pymysql.connect(
             **params,
             cursorclass=pymysql.cursors.DictCursor,
             connect_timeout=10
         )
-        self._db_conn = conn
+        self._scope_local.db_conn = new_conn
         self._db_params = params
-        return conn
+        return new_conn
 
     _bg_jobs: dict[int, tuple[subprocess.Popen, Any, Path]] = field(init=False)
     _bg_next_id: int = field(init=False)
@@ -148,7 +154,7 @@ class WorkspaceTools:
                 break
         return "\n".join(matches) if matches else "(no matches)"
 
-    def mariadb_query(self, query: str, database: str | None = None) -> str:
+    def mariadb_query(self, query: str, database: str | None = None, format: str = "table") -> str:
         """Execute a SQL query against MariaDB and return formatted results."""
         try:
             connection = self._get_db_conn(database)
@@ -160,6 +166,10 @@ class WorkspaceTools:
                         if not rows:
                             return "(no results)"
                         
+                        if format == "json":
+                            import json
+                            return json.dumps(rows, default=str)
+
                         total_rows = len(rows)
                         # Detect if it's a simple list (like SHOW TABLES)
                         is_show_tables = "show tables" in query.lower()

@@ -355,20 +355,16 @@ You MUST use this format for EVERY tool call:
 [TOOL: read_file("path/to/file")]
 
 == PARALLEL ACTION ==
-You can return 5+ calls in ONE turn. They run in PARALLEL.
+You MUST return 3+ calls in ONE turn to investigate in PARALLEL.
 Example:
-[TOOL: mariadb_query("query1")]
-[TOOL: mariadb_query("query2")]
+[TOOL: mariadb_query("DESCRIBE vw_aps_faixa_etaria")]
+[TOOL: mariadb_query("SELECT * FROM vw_aps_faixa_etaria LIMIT 3")]
 
-== WORKFLOW ==
-1. mariadb_query("SHOW TABLES")
-2. mariadb_query("DESCRIBE table")
-3. mariadb_export("SELECT...")
-
-Rules:
-- NO explanations. NO chatter.
-- ONLY output the [TOOL: ...] blocks.
-- 120 workers available. Use them!
+== CRITICAL RULES ==
+- Use EXACT table names from the user query.
+- NEVER use generic placeholders like "table_name" or "known_table".
+- If the last query failed, try a DIFFERENT query. Do not repeat failures.
+- Hardware supports 120 workers. Use them!
 """
 
 
