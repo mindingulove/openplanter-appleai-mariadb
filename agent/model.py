@@ -776,15 +776,83 @@ class AppleModel(OpenAICompatibleModel):
             return int(len(text) / 2.5 * 1.2)
 
         # 2. Aggressively condense if we are over 1800 estimated tokens (out of 4091)
-        # to leave plenty of room for the response and system instructions.
         msgs = conversation.get_messages()
         est = estimate_tokens(msgs, conversation.system_prompt, self.tool_defs)
         if est > 1800:
-            # Condense back to 1 recent turn to clear maximum space
             self.condense_conversation(conversation, keep_recent_turns=1)
             
-        # 3. Call parent completion logic
-        return super().complete(conversation)
+        # 3. Disable streaming for Apple Model to ensure usage telemetry is captured
+        # The local bridge is better suited for atomic request/response.
+        original_complete = super().complete
+        
+        # We temporarily patch our own complete to force stream=False
+        # But a cleaner way is to just call super().complete and hope it respects payload
+        # Actually, let's just copy the logic and force stream=False
+        
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": conversation._provider_messages,
+            "tools": to_openai_tools(defs=self.tool_defs, strict=self.strict_tools),
+            "tool_choice": "auto",
+            "stream": False, # FORCE NO STREAM
+        }
+
+        if conversation.stop_sequences:
+            payload["stop"] = conversation.stop_sequences
+
+        payload["temperature"] = self.temperature
+        
+        url = self.base_url.rstrip("/") + "/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            **self.extra_headers,
+        }
+
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=self.timeout_sec)
+            resp.raise_for_status()
+            parsed = resp.json()
+        except Exception as exc:
+            raise ModelError(f"Apple Bridge Error: {exc}")
+
+        try:
+            message = parsed["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ModelError(f"Model response missing content: {parsed}") from exc
+
+        finish_reason = parsed["choices"][0].get("finish_reason", "")
+        
+        # Parse tool calls
+        raw_tool_calls = message.get("tool_calls")
+        tool_calls: list[ToolCall] = []
+        if raw_tool_calls and isinstance(raw_tool_calls, list):
+            for tc in raw_tool_calls:
+                func = tc.get("function", {})
+                args_str = func.get("arguments", "{}")
+                try:
+                    args = json.loads(args_str)
+                except json.JSONDecodeError:
+                    args = {}
+                tool_calls.append(ToolCall(id=tc.get("id", ""), name=func.get("name", ""), arguments=args))
+
+        text_content = _extract_content(message.get("content", "")) or None
+        
+        # Extract usage and active_workers
+        usage = parsed.get("usage", {})
+        input_tokens = usage.get("prompt_tokens", 0)
+        output_tokens = usage.get("completion_tokens", 0)
+        active_workers = usage.get("active_workers")
+
+        return ModelTurn(
+            tool_calls=tool_calls,
+            text=text_content,
+            stop_reason=finish_reason,
+            raw_response=message,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            active_workers=active_workers,
+        )
 
     def condense_conversation(self, conversation: Conversation, keep_recent_turns: int = 2) -> int:
         """Condense conversation history aggressively for the local Apple model.
