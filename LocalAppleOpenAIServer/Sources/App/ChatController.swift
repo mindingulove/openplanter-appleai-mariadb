@@ -6,55 +6,38 @@ import FoundationModels
 actor ModelWorker {
     let id: Int
     private(set) var isBusy: Bool = false
-    
-    init(id: Int) {
-        self.id = id
-    }
+    init(id: Int) { self.id = id }
     
     func respond(to prompt: String) async throws -> String {
         self.isBusy = true
         defer { self.isBusy = false }
-        
         print("Worker [\(id)]: Thinking (High Priority)...")
         fflush(stdout)
         
-        let generatedContent = try await Task.detached(priority: .userInitiated) {
+        return try await Task.detached(priority: .userInitiated) {
             let session = LanguageModelSession(model: .default)
             let response = try await session.respond(to: prompt)
             return response.content
         }.value
-        
-        print("Worker [\(id)]: Done.")
-        fflush(stdout)
-        return generatedContent
     }
 }
 
 @available(macOS 26.0, *)
 actor ModelPool {
     private var workerDict: [Int: ModelWorker] = [:]
-    private let maxWorkers: Int
-    
     init() {
-        self.maxWorkers = 120
-        for i in 0..<20 {
-            workerDict[i] = ModelWorker(id: i)
-        }
+        for i in 0..<20 { workerDict[i] = ModelWorker(id: i) }
     }
-    
     func getWorker(for index: Int) async -> ModelWorker {
-        let workerID = index % maxWorkers
+        let workerID = index % 120
         if let existing = workerDict[workerID] { return existing }
         let newWorker = ModelWorker(id: workerID)
         workerDict[workerID] = newWorker
         return newWorker
     }
-
     func busyWorkerCount() async -> Int {
         var count = 0
-        for worker in workerDict.values {
-            if await worker.isBusy { count += 1 }
-        }
+        for worker in workerDict.values { if await worker.isBusy { count += 1 } }
         return count
     }
 }
@@ -65,11 +48,6 @@ final class ChatController: @unchecked Sendable {
     private var counter: Int = 0
     private let lock = NSLock()
 
-    init() {
-        print("✅ Apple Foundation Model integration INITIALIZED.")
-        fflush(stdout)
-    }
-    
     private func nextIndex() -> Int {
         lock.lock()
         defer { lock.unlock() }
@@ -81,52 +59,32 @@ final class ChatController: @unchecked Sendable {
     func createChatCompletion(req: Request) async throws -> Response {
         let chatReq = try req.content.decode(OpenAIChatRequest.self)
         
-        // --- DIET PROMPT RECONSTRUCTION ---
         var systemPart = ""
         var discoveryAnchor = ""
         var recentUserPart = ""
         var lastObservation = ""
         
-        // 1. System Prompt (Reduced)
         if let sys = chatReq.messages.first(where: { $0.role == "system" }) {
-            systemPart = String((sys.content ?? "").prefix(500))
+            systemPart = String((sys.content ?? "").prefix(800))
         }
-        
-        // 2. Find ONLY the best schema anchor
-        for msg in chatReq.messages.reversed() { // Look at newest first
+        for msg in chatReq.messages {
             let content = msg.content ?? ""
-            if content.contains("Field") && content.contains("Type") {
-                // It's a DESCRIBE result, heavily truncate it to save tokens
-                discoveryAnchor = "SCHEMA:\n" + String(content.prefix(800))
-                break
-            } else if content.contains("Tables_in") && discoveryAnchor.isEmpty {
-                // Fallback to SHOW TABLES
-                discoveryAnchor = "TABLES:\n" + String(content.prefix(500))
-            }
+            if content.contains("Field") || content.contains(" | ") { discoveryAnchor = String(content.prefix(1000)) }
         }
-        
-        // 3. User Goal
         if let lastUser = chatReq.messages.last(where: { $0.role == "user" }) {
-            recentUserPart = String((lastUser.content ?? "").prefix(400))
+            recentUserPart = String((lastUser.content ?? "").prefix(600))
         }
-        
-        // 4. Last Tool Result
         if let lastObs = chatReq.messages.last(where: { $0.role != "user" && $0.role != "system" }) {
-            lastObservation = String((lastObs.content ?? "").prefix(800))
+            lastObservation = String((lastObs.content ?? "").prefix(1000))
         }
         
         let prompt = """
         \(systemPart)
-        
-        \(discoveryAnchor)
-        
-        LAST RESULT:
-        \(lastObservation)
-        
-        GOAL:
-        \(recentUserPart)
-        
-        ACTION FORMAT: [TOOL: name("arg1")]
+        SCHEMA: \(discoveryAnchor)
+        LAST: \(lastObservation)
+        GOAL: \(recentUserPart)
+        ACT NOW: [TOOL: name("args")]
+        Assistant:
         """
         
         let workerIndex = nextIndex()
@@ -138,50 +96,42 @@ final class ChatController: @unchecked Sendable {
             let finalBusy = max(busyCount, 1)
             let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            // --- SURGICAL TOOL PARSING ---
             var toolCalls: [OpenAIToolCall] = []
             
-            // This regex specifically targets content INSIDE double quotes
-            // e.g. [TOOL: mariadb_query("SELECT * FROM table")] -> name: mariadb_query, arg: SELECT * FROM table
-            let pattern = "\\[TOOL:\\s*([a-zA-Z0-9_]+)\\(\"([^\"]+)\"(?:,\\s*\"([^\"]+)\")?\\)\\]"
-            
+            // 1. PRIMARY PARSER: [TOOL: name("args")]
+            let pattern = "(?:\\[?TOOL:\\s*)?([a-zA-Z0-9_]+)\\s*\\((.*?)\\)\\]?"
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
                 let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
                 let matches = regex.matches(in: trimmed, options: [], range: nsRange)
-                
                 for match in matches {
                     if let nameRange = Range(match.range(at: 1), in: trimmed),
-                       let arg1Range = Range(match.range(at: 2), in: trimmed) {
+                       let argsRange = Range(match.range(at: 2), in: trimmed) {
+                        let name = String(trimmed[nameRange]).trimmingCharacters(in: .whitespaces)
+                        let argsRaw = String(trimmed[argsRange]).trimmingCharacters(in: .whitespaces)
                         
-                        let name = String(trimmed[nameRange])
-                        let arg1 = String(trimmed[arg1Range])
-                        
-                        var arg2: String? = nil
-                        if match.range(at: 3).location != NSNotFound, let arg2Range = Range(match.range(at: 3), in: trimmed) {
-                            arg2 = String(trimmed[arg2Range])
+                        var finalArgs = "{}"
+                        if argsRaw.hasPrefix("{") { finalArgs = argsRaw } 
+                        else {
+                            let clean = argsRaw.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                            let dict = (name == "mariadb_query") ? ["query": clean] : ["table": clean]
+                            if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
+                                finalArgs = s
+                            }
                         }
-                        
-                        var dict: [String: String] = [:]
-                        if name == "mariadb_query" || name == "mariadb_export" {
-                            dict["query"] = arg1
-                        } else if name == "mariadb_search" {
-                            dict["table"] = arg1
-                            if let a2 = arg2 { dict["query"] = a2 }
-                        } else if name == "mariadb_sample" {
-                            dict["table"] = arg1
-                        } else if name == "think" {
-                            dict["note"] = arg1
-                        } else if name == "read_file" || name == "list_files" {
-                            dict["path"] = arg1
-                        }
-                        
-                        if let data = try? JSONSerialization.data(withJSONObject: dict),
-                           let finalArgsStr = String(data: data, encoding: .utf8) {
-                            toolCalls.append(OpenAIToolCall(
-                                id: "call_" + UUID().uuidString.prefix(8),
-                                type: "function",
-                                function: OpenAIToolCallFunction(name: name, arguments: finalArgsStr)
-                            ))
+                        toolCalls.append(OpenAIToolCall(id: "call_" + UUID().uuidString.prefix(8), type: "function", function: OpenAIToolCallFunction(name: name, arguments: finalArgs)))
+                    }
+                }
+            }
+            
+            // 2. FALLBACK PARSER: For plain "TOOL: DESCRIBE" or "TOOL: SELECT..."
+            if toolCalls.isEmpty {
+                if let range = trimmed.range(of: "TOOL: ", options: .caseInsensitive) {
+                    let part = String(trimmed[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let sql = part.components(separatedBy: "\n")[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !sql.isEmpty {
+                        let dict = ["query": sql]
+                        if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
+                            toolCalls.append(OpenAIToolCall(id: "call_" + UUID().uuidString.prefix(8), type: "function", function: OpenAIToolCallFunction(name: "mariadb_query", arguments: s)))
                         }
                     }
                 }
@@ -192,48 +142,30 @@ final class ChatController: @unchecked Sendable {
                 object: "chat.completion",
                 created: Int(Date().timeIntervalSince1970),
                 model: chatReq.model,
-                choices: [OpenAIChoice(
-                    index: 0,
-                    message: OpenAIMessageResponse(
-                        role: "assistant",
-                        content: toolCalls.isEmpty ? trimmed : nil,
-                        tool_calls: toolCalls.isEmpty ? nil : toolCalls
-                    ),
-                    finish_reason: toolCalls.isEmpty ? "stop" : "tool_calls"
-                )],
-                usage: OpenAIUsage(
-                    prompt_tokens: prompt.count / 4,
-                    completion_tokens: trimmed.count / 4,
-                    total_tokens: (prompt.count + trimmed.count) / 4
-                )
+                choices: [OpenAIChoice(index: 0, message: OpenAIMessageResponse(role: "assistant", content: toolCalls.isEmpty ? trimmed : nil, tool_calls: toolCalls.isEmpty ? nil : toolCalls), finish_reason: toolCalls.isEmpty ? "stop" : "tool_calls")],
+                usage: OpenAIUsage(prompt_tokens: prompt.count/4, completion_tokens: trimmed.count/4, total_tokens: (prompt.count+trimmed.count)/4)
             )
             
             var rawRes = try JSONEncoder().encode(responseObj)
-            if var json = try JSONSerialization.jsonObject(with: rawRes) as? [String: Any],
-               var usage = json["usage"] as? [String: Any] {
+            if var json = try JSONSerialization.jsonObject(with: rawRes) as? [String: Any], var usage = json["usage"] as? [String: Any] {
                 usage["active_workers"] = finalBusy
                 usage["worker_id"] = workerIndex % 120
                 json["usage"] = usage
                 rawRes = try JSONSerialization.data(withJSONObject: json)
             }
-            
             let res = Response(status: .ok, body: .init(data: rawRes))
             res.headers.replaceOrAdd(name: .contentType, value: "application/json")
             return res
-            
         } catch {
-            print("ChatController: ERROR - \(error)")
             throw Abort(.internalServerError, reason: "Apple Bridge Error: \(error.localizedDescription)")
         }
     }
 
     @Sendable
     func summarize(req: Request) async throws -> String {
-        struct SummarizeRequest: Content {
-            let text: String
-        }
+        struct SummarizeRequest: Content { let text: String }
         let summarizeReq = try req.content.decode(SummarizeRequest.self)
-        let prompt = "Summarize concisely: \(summarizeReq.text.prefix(2000))\nSummary:"
+        let prompt = "Summarize: \(summarizeReq.text.prefix(2000))"
         let worker = await pool.getWorker(for: nextIndex())
         return try await worker.respond(to: prompt)
     }
