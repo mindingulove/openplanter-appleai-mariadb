@@ -14,9 +14,12 @@ actor ModelWorker {
         print("Worker [\(id)]: Thinking (High Priority)...")
         fflush(stdout)
         
+        // Sample context overflow protection: If prompt is too huge, truncate.
+        let finalPrompt = String(prompt.prefix(12000)) 
+        
         return try await Task.detached(priority: .userInitiated) {
             let session = LanguageModelSession(model: .default)
-            let response = try await session.respond(to: prompt)
+            let response = try await session.respond(to: finalPrompt)
             return response.content
         }.value
     }
@@ -98,7 +101,6 @@ final class ChatController: @unchecked Sendable {
             
             var toolCalls: [OpenAIToolCall] = []
             
-            // 1. PRIMARY PARSER: [TOOL: name("args")]
             let pattern = "(?:\\[?TOOL:\\s*)?([a-zA-Z0-9_]+)\\s*\\((.*?)\\)\\]?"
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
                 let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
@@ -112,8 +114,28 @@ final class ChatController: @unchecked Sendable {
                         var finalArgs = "{}"
                         if argsRaw.hasPrefix("{") { finalArgs = argsRaw } 
                         else {
-                            let clean = argsRaw.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-                            let dict = (name == "mariadb_query") ? ["query": clean] : ["table": clean]
+                            // SPLIT BY COMMA FOR MULTI-ARG RECOVERY
+                            let parts = argsRaw.components(separatedBy: ",").map { 
+                                $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
+                            }
+                            
+                            var dict: [String: String] = [:]
+                            if name == "mariadb_query" || name == "mariadb_export" {
+                                if parts.count >= 1 { dict["query"] = parts[0] }
+                            } else if name == "mariadb_search" {
+                                if parts.count >= 1 { dict["table"] = parts[0] }
+                                if parts.count >= 2 { dict["query"] = parts[1] }
+                            } else if name == "mariadb_sample" {
+                                if parts.count >= 1 { dict["table"] = parts[0] }
+                            } else if name == "think" {
+                                if parts.count >= 1 { dict["note"] = parts[0] }
+                            } else if name == "read_file" || name == "list_files" || name == "search_files" {
+                                if parts.count >= 1 { dict["path"] = parts[0] }
+                                if parts.count >= 2 { dict["query"] = parts[1] }
+                            } else if name == "run_shell" {
+                                if parts.count >= 1 { dict["command"] = parts[0] }
+                            }
+                            
                             if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
                                 finalArgs = s
                             }
@@ -123,7 +145,6 @@ final class ChatController: @unchecked Sendable {
                 }
             }
             
-            // 2. FALLBACK PARSER: For plain "TOOL: DESCRIBE" or "TOOL: SELECT..."
             if toolCalls.isEmpty {
                 if let range = trimmed.range(of: "TOOL: ", options: .caseInsensitive) {
                     let part = String(trimmed[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -157,6 +178,7 @@ final class ChatController: @unchecked Sendable {
             res.headers.replaceOrAdd(name: .contentType, value: "application/json")
             return res
         } catch {
+            print("ChatController Error: \(error)")
             throw Abort(.internalServerError, reason: "Apple Bridge Error: \(error.localizedDescription)")
         }
     }
