@@ -92,20 +92,15 @@ final class ChatController: @unchecked Sendable {
             systemPart = String((sys.content ?? "").prefix(800))
         }
         
-        // Find Anchors and Errors
         for msg in chatReq.messages {
             let content = msg.content ?? ""
-            
-            // Priority 1: DATABASE SCHEMA ANCHOR
             if content.contains("Tables_in") || content.contains("Field") || content.contains(" | ") {
                 discoveryAnchor = String(content.prefix(1500))
             }
-            
-            // Priority 2: CRITICAL ERRORS
             if content.contains("Unknown column") {
-                errorAlert = "\n⚠️ CRITICAL ERROR: You just tried to access a column that DOES NOT EXIST. You MUST call DESCRIBE table_name immediately to find the real column names."
-            } else if content.contains("SQL syntax") {
-                errorAlert = "\n⚠️ CRITICAL ERROR: Your previous SQL query had a SYNTAX ERROR. Reformulate it carefully (use backticks for words like 'count' or 'index')."
+                errorAlert = "\n⚠️ ERROR: Column not found. Use DESCRIBE table."
+            } else if content.contains("requires") {
+                errorAlert = "\n⚠️ ERROR: Tool arguments were empty. Use tool(\"arg1\", \"arg2\") format."
             }
         }
         
@@ -130,8 +125,8 @@ final class ChatController: @unchecked Sendable {
         GOAL:
         \(recentUserPart)
         
-        INSTRUCTION: If errorAlert is present, SOLVE IT FIRST with DESCRIBE. 
-        Output format: [TOOL: mariadb_query("...")]
+        ACTION: Output ONLY tool calls. No plans.
+        Format: [TOOL: name("arg1", "arg2")]
         Assistant:
         """
         
@@ -144,9 +139,10 @@ final class ChatController: @unchecked Sendable {
             let finalBusy = max(busyCount, 1)
             let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            // --- PRECISION TOOL CALL PARSING ---
+            // --- ROBUST POSITIONAL-TO-KEYWORD PARSER ---
             var toolCalls: [OpenAIToolCall] = []
-            let pattern = "\\[TOOL:\\s*([a-zA-Z0-9_]+)\\s*\\((.*?)\\)\\]"
+            let pattern = "(?:\\[TOOL:\\s*)?([a-zA-Z0-9_]+)\\s*\\((.*?)\\)(?:\\])?"
+            
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
                 let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
                 let matches = regex.matches(in: trimmed, options: [], range: nsRange)
@@ -156,22 +152,33 @@ final class ChatController: @unchecked Sendable {
                        let argsRange = Range(match.range(at: 2), in: trimmed) {
                         
                         let name = String(trimmed[nameRange]).trimmingCharacters(in: .whitespaces)
-                        var argsRaw = String(trimmed[argsRange]).trimmingCharacters(in: .whitespaces)
+                        let argsRaw = String(trimmed[argsRange]).trimmingCharacters(in: .whitespaces)
                         
                         var finalArgsStr = "{}"
                         
-                        if argsRaw.hasPrefix("{") && argsRaw.hasSuffix("}") {
+                        if argsRaw.hasPrefix("{") {
                             finalArgsStr = argsRaw
                         } else {
-                            let cleanVal = argsRaw.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                            // POSITIONAL RECOVERY: Split by comma and map to known keys
+                            let parts = argsRaw.components(separatedBy: ",").map { 
+                                $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
+                            }
+                            
                             var dict: [String: String] = [:]
                             if name == "mariadb_query" || name == "mariadb_export" {
-                                dict["query"] = cleanVal
+                                if parts.count >= 1 { dict["query"] = parts[0] }
+                            } else if name == "mariadb_search" {
+                                if parts.count >= 1 { dict["table"] = parts[0] }
+                                if parts.count >= 2 { dict["query"] = parts[1] }
+                            } else if name == "mariadb_sample" {
+                                if parts.count >= 1 { dict["table"] = parts[0] }
                             } else if name == "think" {
-                                dict["note"] = cleanVal
-                            } else {
-                                dict["path"] = cleanVal
-                                dict["command"] = cleanVal
+                                if parts.count >= 1 { dict["note"] = parts[0] }
+                            } else if name == "read_file" || name == "list_files" || name == "search_files" {
+                                if parts.count >= 1 { dict["path"] = parts[0] }
+                                if parts.count >= 2 { dict["query"] = parts[1] }
+                            } else if name == "run_shell" {
+                                if parts.count >= 1 { dict["command"] = parts[0] }
                             }
                             
                             if let data = try? JSONSerialization.data(withJSONObject: dict),
@@ -225,7 +232,7 @@ final class ChatController: @unchecked Sendable {
             
         } catch {
             print("ChatController: ERROR - \(error)")
-            throw Abort(.internalServerError, reason: "Apple Foundation Model error: \(error.localizedDescription)")
+            throw Abort(.internalServerError, reason: "Apple Bridge Error: \(error.localizedDescription)")
         }
     }
 
