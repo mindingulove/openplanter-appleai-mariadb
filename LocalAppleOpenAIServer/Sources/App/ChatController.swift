@@ -5,12 +5,39 @@ import FoundationModels
 @available(macOS 26.0, *)
 actor ModelWorker {
     let id: Int
+    private var isBusy: Bool = false
     init(id: Int) { self.id = id }
+    
+    func setBusy(_ busy: Bool) { self.isBusy = busy }
+    func getBusy() -> Bool { return self.isBusy }
+
     func respond(to prompt: String) async throws -> String {
         return try await Task.detached(priority: .userInitiated) {
             let session = LanguageModelSession(model: .default)
-            return try await session.respond(to: String(prompt.prefix(8000))).content
+            return try await session.respond(to: String(prompt.prefix(10000))).content
         }.value
+    }
+}
+
+@available(macOS 26.0, *)
+actor ModelPool {
+    private var workerDict: [Int: ModelWorker] = [:]
+    init() {
+        for i in 0..<20 { workerDict[i] = ModelWorker(id: i) }
+    }
+    func getWorker(for index: Int) async -> ModelWorker {
+        let workerID = index % 120
+        if let existing = workerDict[workerID] { return existing }
+        let newWorker = ModelWorker(id: workerID)
+        workerDict[workerID] = newWorker
+        return newWorker
+    }
+    func busyWorkerCount() async -> Int {
+        var count = 0
+        for worker in workerDict.values {
+            if await worker.getBusy() { count += 1 }
+        }
+        return count
     }
 }
 
@@ -23,7 +50,7 @@ actor SchemaCache {
 
 @available(macOS 26.0, *)
 final class ChatController: @unchecked Sendable {
-    private let pool = (0..<20).map { ModelWorker(id: $0) }
+    private let pool = ModelPool()
     private let schemaCache = SchemaCache()
     private var counter: Int = 0
     private let lock = NSLock()
@@ -35,42 +62,106 @@ final class ChatController: @unchecked Sendable {
     @Sendable
     func createChatCompletion(req: Request) async throws -> Response {
         let chatReq = try req.content.decode(OpenAIChatRequest.self)
-        var sys = "", anchor = "", goal = "", last = ""
+        var systemPart = ""
+        var discoveryAnchor = ""
+        var recentUserPart = ""
+        var lastObservation = ""
         
-        if let s = chatReq.messages.first(where: { $0.role == "system" }) { sys = String(s.content?.prefix(600) ?? "") }
-        anchor = await schemaCache.get()
-        if anchor.isEmpty { anchor = "SCHEMA: (id_aps, faixa_etaria, quantidade)" }
+        if let sys = chatReq.messages.first(where: { $0.role == "system" }) {
+            systemPart = String((sys.content ?? "").prefix(800))
+        }
+
+        for msg in chatReq.messages {
+            let content = msg.content ?? ""
+            if content.contains("Field") && content.contains("Type") {
+                let lines = content.components(separatedBy: "\n")
+                var cols: [String] = []
+                for line in lines {
+                    let parts = line.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+                    if parts.count >= 2 && parts[0] != "Field" && !parts[0].contains("-") {
+                        cols.append("\(parts[0]):\(parts[1])")
+                    }
+                }
+                if !cols.isEmpty {
+                    await schemaCache.update(schema: "SCHEMA: (\(cols.joined(separator: ", ")))")
+                }
+            }
+        }
         
-        if let g = chatReq.messages.last(where: { $0.role == "user" }) { goal = String(g.content?.prefix(400) ?? "") }
-        if let l = chatReq.messages.last(where: { $0.role != "user" && $0.role != "system" }) { last = String(l.content?.prefix(600) ?? "") }
+        discoveryAnchor = await schemaCache.get()
+        if discoveryAnchor.isEmpty {
+            discoveryAnchor = "SCHEMA: (id_aps, faixa_etaria, quantidade)"
+        }
+
+        if let lastUser = chatReq.messages.last(where: { $0.role == "user" }) {
+            recentUserPart = String((lastUser.content ?? "").prefix(600))
+        }
+        if let lastObs = chatReq.messages.last(where: { $0.role != "user" && $0.role != "system" }) {
+            lastObservation = String((lastObs.content ?? "").prefix(1000))
+        }
         
-        let prompt = "\(sys)\n\(anchor)\nLAST: \(last)\nGOAL: \(goal)\nACT: [TOOL: mariadb_query(\"SQL\")]"
-        let worker = pool[nextIndex() % 20]
+        let prompt = """
+        \(systemPart)
+        STRUCTURE: \(discoveryAnchor)
+        LAST: \(lastObservation)
+        GOAL: \(recentUserPart)
+        ACT NOW: [TOOL: name("args")]
+        Assistant:
+        """
+        
+        let workerIndex = nextIndex()
+        let workerID = workerIndex % 120
+        let worker = await pool.getWorker(for: workerIndex)
         
         do {
-            let text = try await worker.respond(to: prompt)
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            var toolCalls: [OpenAIToolCall] = []
+            await worker.setBusy(true)
+            defer { Task { await worker.setBusy(false) } }
             
+            let generatedText = try await worker.respond(to: prompt)
+            let busyCount = await pool.busyWorkerCount()
+            let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            var toolCalls: [OpenAIToolCall] = []
             let pattern = "(?:\\[?TOOL:\\s*)?([a-zA-Z0-9_]+)\\s*\\((.*?)\\)\\]?"
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
-                let matches = regex.matches(in: trimmed, options: [], range: NSRange(trimmed.startIndex..., in: trimmed))
+                let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
+                let matches = regex.matches(in: trimmed, options: [], range: nsRange)
                 for match in matches {
-                    let name = String(trimmed[Range(match.range(at: 1), in: trimmed)!])
-                    var sql = String(trimmed[Range(match.range(at: 2), in: trimmed)!]).trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
-                    
-                    if name == "mariadb_query" {
-                        let lsql = sql.lowercased()
-                        // FIX AUTO-RECOVERY: Only SELECT needs FROM
-                        if lsql.contains("select") && !lsql.contains("from") {
-                            sql += " FROM vw_aps_faixa_etaria"
+                    if let nameRange = Range(match.range(at: 1), in: trimmed),
+                       let argsRange = Range(match.range(at: 2), in: trimmed) {
+                        let name = String(trimmed[nameRange]).trimmingCharacters(in: .whitespaces)
+                        let argsRaw = String(trimmed[argsRange]).trimmingCharacters(in: .whitespaces)
+                        var finalArgs = "{}"
+                        if argsRaw.hasPrefix("{") { finalArgs = argsRaw } 
+                        else {
+                            let parts = argsRaw.components(separatedBy: ",").map { 
+                                $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
+                            }
+                            var dict: [String: String] = [:]
+                            if name == "mariadb_query" { if parts.count >= 1 { dict["query"] = parts[0] } }
+                            else if name == "mariadb_search" {
+                                if parts.count >= 1 { dict["table"] = parts[0] }
+                                if parts.count >= 2 { dict["query"] = parts[1] }
+                            } else if name == "mariadb_sample" {
+                                if parts.count >= 1 { dict["table"] = parts[0] }
+                            } else if name == "think" {
+                                if parts.count >= 1 { dict["note"] = parts[0] }
+                            }
+                            if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
+                                finalArgs = s
+                            }
                         }
-                        
-                        let dict = ["query": sql]
-                        if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
-                            toolCalls.append(OpenAIToolCall(id: "call_" + UUID().uuidString.prefix(8), type: "function", function: OpenAIToolCallFunction(name: name, arguments: s)))
-                        }
+                        toolCalls.append(OpenAIToolCall(id: "call_" + UUID().uuidString.prefix(8), type: "function", function: OpenAIToolCallFunction(name: name, arguments: finalArgs)))
                     }
+                }
+            }
+            
+            if toolCalls.isEmpty && (trimmed.contains("SELECT") || trimmed.contains("DESCRIBE")) {
+                let sql = trimmed.components(separatedBy: "\n").first(where: { $0.contains("SELECT") || $0.contains("DESCRIBE") }) ?? trimmed
+                let cleanSQL = sql.replacingOccurrences(of: "[TOOL: ", with: "").replacingOccurrences(of: "]", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let dict = ["query": cleanSQL]
+                if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
+                    toolCalls.append(OpenAIToolCall(id: "call_" + UUID().uuidString.prefix(8), type: "function", function: OpenAIToolCallFunction(name: "mariadb_query", arguments: s)))
                 }
             }
             
@@ -82,8 +173,19 @@ final class ChatController: @unchecked Sendable {
                 choices: [OpenAIChoice(index: 0, message: OpenAIMessageResponse(role: "assistant", content: toolCalls.isEmpty ? trimmed : nil, tool_calls: toolCalls.isEmpty ? nil : toolCalls), finish_reason: toolCalls.isEmpty ? "stop" : "tool_calls")],
                 usage: OpenAIUsage(prompt_tokens: prompt.count/4, completion_tokens: trimmed.count/4, total_tokens: (prompt.count+trimmed.count)/4)
             )
-            return try await responseObj.encodeResponse(for: req)
+            
+            var rawRes = try JSONEncoder().encode(responseObj)
+            if var json = try JSONSerialization.jsonObject(with: rawRes) as? [String: Any], var usage = json["usage"] as? [String: Any] {
+                usage["active_workers"] = max(busyCount, 1)
+                usage["worker_id"] = workerID
+                json["usage"] = usage
+                rawRes = try JSONSerialization.data(withJSONObject: json)
+            }
+            let res = Response(status: .ok, body: .init(data: rawRes))
+            res.headers.replaceOrAdd(name: .contentType, value: "application/json")
+            return res
         } catch {
+            print("ChatController Error: \(error)")
             throw Abort(.internalServerError, reason: "Apple Bridge Error: \(error.localizedDescription)")
         }
     }
