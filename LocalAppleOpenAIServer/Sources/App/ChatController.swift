@@ -81,53 +81,52 @@ final class ChatController: @unchecked Sendable {
     func createChatCompletion(req: Request) async throws -> Response {
         let chatReq = try req.content.decode(OpenAIChatRequest.self)
         
-        // --- ANCHORED PROMPT RECONSTRUCTION ---
+        // --- DIET PROMPT RECONSTRUCTION ---
         var systemPart = ""
         var discoveryAnchor = ""
         var recentUserPart = ""
         var lastObservation = ""
-        var errorAlert = ""
         
+        // 1. System Prompt (Reduced)
         if let sys = chatReq.messages.first(where: { $0.role == "system" }) {
-            systemPart = String((sys.content ?? "").prefix(800))
+            systemPart = String((sys.content ?? "").prefix(500))
         }
         
-        for msg in chatReq.messages {
+        // 2. Find ONLY the best schema anchor
+        for msg in chatReq.messages.reversed() { // Look at newest first
             let content = msg.content ?? ""
-            if content.contains("Tables_in") || content.contains("Field") || content.contains(" | ") {
-                discoveryAnchor = String(content.prefix(1500))
-            }
-            if content.contains("Unknown column") {
-                errorAlert = "\n⚠️ ERROR: Column not found. Use DESCRIBE table."
-            } else if content.contains("requires") {
-                errorAlert = "\n⚠️ ERROR: Tool arguments were empty. Use tool(\"arg1\", \"arg2\") format."
+            if content.contains("Field") && content.contains("Type") {
+                // It's a DESCRIBE result, heavily truncate it to save tokens
+                discoveryAnchor = "SCHEMA:\n" + String(content.prefix(800))
+                break
+            } else if content.contains("Tables_in") && discoveryAnchor.isEmpty {
+                // Fallback to SHOW TABLES
+                discoveryAnchor = "TABLES:\n" + String(content.prefix(500))
             }
         }
         
+        // 3. User Goal
         if let lastUser = chatReq.messages.last(where: { $0.role == "user" }) {
-            recentUserPart = String((lastUser.content ?? "").prefix(600))
+            recentUserPart = String((lastUser.content ?? "").prefix(400))
         }
         
+        // 4. Last Tool Result
         if let lastObs = chatReq.messages.last(where: { $0.role != "user" && $0.role != "system" }) {
-            lastObservation = String((lastObs.content ?? "").prefix(1200))
+            lastObservation = String((lastObs.content ?? "").prefix(800))
         }
         
         let prompt = """
         \(systemPart)
         
-        DATABASE SCHEMA:
         \(discoveryAnchor)
         
-        LAST TOOL OUTPUT:
+        LAST RESULT:
         \(lastObservation)
-        \(errorAlert)
         
         GOAL:
         \(recentUserPart)
         
-        ACTION: Output ONLY tool calls. No plans.
-        Format: [TOOL: name("arg1", "arg2")]
-        Assistant:
+        ACTION FORMAT: [TOOL: name("arg1")]
         """
         
         let workerIndex = nextIndex()
@@ -139,9 +138,12 @@ final class ChatController: @unchecked Sendable {
             let finalBusy = max(busyCount, 1)
             let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            // --- ROBUST POSITIONAL-TO-KEYWORD PARSER ---
+            // --- SURGICAL TOOL PARSING ---
             var toolCalls: [OpenAIToolCall] = []
-            let pattern = "(?:\\[TOOL:\\s*)?([a-zA-Z0-9_]+)\\s*\\((.*?)\\)(?:\\])?"
+            
+            // This regex specifically targets content INSIDE double quotes
+            // e.g. [TOOL: mariadb_query("SELECT * FROM table")] -> name: mariadb_query, arg: SELECT * FROM table
+            let pattern = "\\[TOOL:\\s*([a-zA-Z0-9_]+)\\(\"([^\"]+)\"(?:,\\s*\"([^\"]+)\")?\\)\\]"
             
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
                 let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
@@ -149,49 +151,38 @@ final class ChatController: @unchecked Sendable {
                 
                 for match in matches {
                     if let nameRange = Range(match.range(at: 1), in: trimmed),
-                       let argsRange = Range(match.range(at: 2), in: trimmed) {
+                       let arg1Range = Range(match.range(at: 2), in: trimmed) {
                         
-                        let name = String(trimmed[nameRange]).trimmingCharacters(in: .whitespaces)
-                        let argsRaw = String(trimmed[argsRange]).trimmingCharacters(in: .whitespaces)
+                        let name = String(trimmed[nameRange])
+                        let arg1 = String(trimmed[arg1Range])
                         
-                        var finalArgsStr = "{}"
-                        
-                        if argsRaw.hasPrefix("{") {
-                            finalArgsStr = argsRaw
-                        } else {
-                            // POSITIONAL RECOVERY: Split by comma and map to known keys
-                            let parts = argsRaw.components(separatedBy: ",").map { 
-                                $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
-                            }
-                            
-                            var dict: [String: String] = [:]
-                            if name == "mariadb_query" || name == "mariadb_export" {
-                                if parts.count >= 1 { dict["query"] = parts[0] }
-                            } else if name == "mariadb_search" {
-                                if parts.count >= 1 { dict["table"] = parts[0] }
-                                if parts.count >= 2 { dict["query"] = parts[1] }
-                            } else if name == "mariadb_sample" {
-                                if parts.count >= 1 { dict["table"] = parts[0] }
-                            } else if name == "think" {
-                                if parts.count >= 1 { dict["note"] = parts[0] }
-                            } else if name == "read_file" || name == "list_files" || name == "search_files" {
-                                if parts.count >= 1 { dict["path"] = parts[0] }
-                                if parts.count >= 2 { dict["query"] = parts[1] }
-                            } else if name == "run_shell" {
-                                if parts.count >= 1 { dict["command"] = parts[0] }
-                            }
-                            
-                            if let data = try? JSONSerialization.data(withJSONObject: dict),
-                               let s = String(data: data, encoding: .utf8) {
-                                finalArgsStr = s
-                            }
+                        var arg2: String? = nil
+                        if match.range(at: 3).location != NSNotFound, let arg2Range = Range(match.range(at: 3), in: trimmed) {
+                            arg2 = String(trimmed[arg2Range])
                         }
                         
-                        toolCalls.append(OpenAIToolCall(
-                            id: "call_" + UUID().uuidString.prefix(8),
-                            type: "function",
-                            function: OpenAIToolCallFunction(name: name, arguments: finalArgsStr)
-                        ))
+                        var dict: [String: String] = [:]
+                        if name == "mariadb_query" || name == "mariadb_export" {
+                            dict["query"] = arg1
+                        } else if name == "mariadb_search" {
+                            dict["table"] = arg1
+                            if let a2 = arg2 { dict["query"] = a2 }
+                        } else if name == "mariadb_sample" {
+                            dict["table"] = arg1
+                        } else if name == "think" {
+                            dict["note"] = arg1
+                        } else if name == "read_file" || name == "list_files" {
+                            dict["path"] = arg1
+                        }
+                        
+                        if let data = try? JSONSerialization.data(withJSONObject: dict),
+                           let finalArgsStr = String(data: data, encoding: .utf8) {
+                            toolCalls.append(OpenAIToolCall(
+                                id: "call_" + UUID().uuidString.prefix(8),
+                                type: "function",
+                                function: OpenAIToolCallFunction(name: name, arguments: finalArgsStr)
+                            ))
+                        }
                     }
                 }
             }
@@ -242,7 +233,7 @@ final class ChatController: @unchecked Sendable {
             let text: String
         }
         let summarizeReq = try req.content.decode(SummarizeRequest.self)
-        let prompt = "Summarize concisely: \(summarizeReq.text.prefix(2500))\nSummary:"
+        let prompt = "Summarize concisely: \(summarizeReq.text.prefix(2000))\nSummary:"
         let worker = await pool.getWorker(for: nextIndex())
         return try await worker.respond(to: prompt)
     }
