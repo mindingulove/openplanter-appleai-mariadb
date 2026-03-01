@@ -83,20 +83,12 @@ final class ChatController: @unchecked Sendable {
         
         // --- ANCHORED PROMPT RECONSTRUCTION ---
         var systemPart = ""
-        var toolsPart = ""
         var discoveryAnchor = ""
         var recentUserPart = ""
         var lastObservation = ""
         
         if let sys = chatReq.messages.first(where: { $0.role == "system" }) {
             systemPart = String((sys.content ?? "").prefix(800))
-        }
-        
-        if let tools = chatReq.tools {
-            toolsPart = "TOOLS:\n"
-            for t in tools.prefix(12) { 
-                toolsPart += "- \(t.function.name): \(t.function.description ?? "")\n"
-            }
         }
         
         for msg in chatReq.messages {
@@ -120,8 +112,6 @@ final class ChatController: @unchecked Sendable {
         let prompt = """
         \(systemPart)
         
-        \(toolsPart)
-        
         SCHEMA:
         \(discoveryAnchor)
         
@@ -131,9 +121,8 @@ final class ChatController: @unchecked Sendable {
         GOAL:
         \(recentUserPart)
         
-        INSTRUCTION: Solve the GOAL. 
-        To use tools, you MUST output: tool_name("arguments")
-        You can call multiple tools in one turn.
+        CRITICAL: To use tools, you MUST use the format: [TOOL: name("args")]
+        Example: [TOOL: mariadb_query("SELECT * FROM table")]
         Assistant:
         """
         
@@ -144,30 +133,49 @@ final class ChatController: @unchecked Sendable {
             let generatedText = try await worker.respond(to: prompt)
             let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            // --- RECOVERY-FIRST TOOL CALL PARSING ---
+            // --- GREEDY MULTI-FORMAT TOOL PARSING ---
             var toolCalls: [OpenAIToolCall] = []
+            let knownTools = ["mariadb_query", "mariadb_export", "read_data_chunk", "summarize_data", "compress_context", "read_file", "write_file", "run_shell", "think", "list_files", "search_files", "subtask", "execute"]
             
-            let pattern = "([a-zA-Z0-9_]+)\\s*\\((.*)\\)"
-            if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
+            // Pattern 1: [TOOL: name("args")] - Our preferred rigid format
+            let pattern1 = "\\[TOOL:\\s*([a-zA-Z0-9_]+)\\s*\\((.*)\\)\\]"
+            
+            // Pattern 2: name("args") or name "args" - Model's natural tendency
+            let pattern2 = "([a-zA-Z0-9_]+)\\s*(?:\\(|\\s+)([^\\n\\)]+)\\)?"
+            
+            let combinedPattern = "(\(pattern1))|(\(pattern2))"
+            
+            if let regex = try? NSRegularExpression(pattern: combinedPattern, options: [.dotMatchesLineSeparators]) {
                 let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
                 let matches = regex.matches(in: trimmed, options: [], range: nsRange)
                 
                 for match in matches {
-                    if let nameRange = Range(match.range(at: 1), in: trimmed),
-                       let argsRange = Range(match.range(at: 2), in: trimmed) {
-                        let name = String(trimmed[nameRange]).trimmingCharacters(in: .whitespaces)
-                        var args = String(trimmed[argsRange]).trimmingCharacters(in: .whitespaces)
-                        
-                        // SMART RECOVERY: If args aren't JSON, make them JSON
+                    // Extract name and args based on which pattern matched
+                    var name = ""
+                    var args = ""
+                    
+                    if match.range(at: 2).location != NSNotFound {
+                        // Pattern 1 matched
+                        name = String(trimmed[Range(match.range(at: 2), in: trimmed)!]).trimmingCharacters(in: .whitespaces)
+                        args = String(trimmed[Range(match.range(at: 3), in: trimmed)!]).trimmingCharacters(in: .whitespaces)
+                    } else if match.range(at: 5).location != NSNotFound {
+                        // Pattern 2 matched
+                        name = String(trimmed[Range(match.range(at: 5), in: trimmed)!]).trimmingCharacters(in: .whitespaces)
+                        args = String(trimmed[Range(match.range(at: 6), in: trimmed)!]).trimmingCharacters(in: .whitespaces)
+                    }
+                    
+                    if knownTools.contains(name) {
+                        // Cleanup args: convert simple strings to JSON
                         if !args.hasPrefix("{") {
-                            // If it's just a string (quoted or not), map to the primary key
-                            let cleanStr = args.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                            let cleanStr = args.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
                             if name == "mariadb_query" || name == "mariadb_export" {
                                 args = "{\"query\": \"\(cleanStr)\"}"
-                            } else if name == "read_file" || name == "list_files" {
-                                args = "{\"path\": \"\(cleanStr)\"}"
+                            } else if name == "read_file" || name == "list_files" || name == "search_files" {
+                                args = "{\"path\": \"\(cleanStr)\", \"query\": \"\(cleanStr)\"}"
                             } else if name == "think" {
                                 args = "{\"note\": \"\(cleanStr)\"}"
+                            } else if name == "run_shell" {
+                                args = "{\"command\": \"\(cleanStr)\"}"
                             }
                         }
                         
@@ -180,7 +188,10 @@ final class ChatController: @unchecked Sendable {
                 }
             }
             
+            // Sample busy count BEFORE finishing
             let busyCount = await pool.busyWorkerCount()
+            let finalBusy = max(busyCount, 1) // Always at least 1 since we are running
+            
             let responseObj = OpenAIChatResponse(
                 id: "chatcmpl-" + UUID().uuidString,
                 object: "chat.completion",
@@ -205,7 +216,7 @@ final class ChatController: @unchecked Sendable {
             var rawRes = try JSONEncoder().encode(responseObj)
             if var json = try JSONSerialization.jsonObject(with: rawRes) as? [String: Any],
                var usage = json["usage"] as? [String: Any] {
-                usage["active_workers"] = busyCount
+                usage["active_workers"] = finalBusy
                 usage["worker_id"] = workerIndex % 120
                 json["usage"] = usage
                 rawRes = try JSONSerialization.data(withJSONObject: json)
@@ -227,7 +238,7 @@ final class ChatController: @unchecked Sendable {
             let text: String
         }
         let summarizeReq = try req.content.decode(SummarizeRequest.self)
-        let prompt = "Summarize this data concisely: \(summarizeReq.text.prefix(2500))\nSummary:"
+        let prompt = "Summarize concisely: \(summarizeReq.text.prefix(2500))\nSummary:"
         let worker = await pool.getWorker(for: nextIndex())
         return try await worker.respond(to: prompt)
     }

@@ -347,12 +347,18 @@ This database is a primary source of ground truth for your investigation.
 
 
 MINIMAL_SYSTEM_PROMPT = """\
-You are OpenPlanter. Context is limited (4k tokens). Be BRIEF. Just ACT.
+You are OpenPlanter. Context is 4k. Be BRIEF. Just ACT.
 
-== ACTIONS ==
-- Call tools like this: mariadb_query("SELECT...")
-- Use MULTIPLE calls in one turn for parallel speed.
-- If last result was empty/failed, try a different query.
+== HOW TO CALL TOOLS ==
+You MUST use this format for EVERY tool call:
+[TOOL: mariadb_query("SELECT...")]
+[TOOL: read_file("path/to/file")]
+
+== PARALLEL ACTION ==
+You can return 5+ calls in ONE turn. They run in PARALLEL.
+Example:
+[TOOL: mariadb_query("query1")]
+[TOOL: mariadb_query("query2")]
 
 == WORKFLOW ==
 1. mariadb_query("SHOW TABLES")
@@ -361,7 +367,8 @@ You are OpenPlanter. Context is limited (4k tokens). Be BRIEF. Just ACT.
 
 Rules:
 - NO explanations. NO chatter.
-- Hardware supports 120 parallel workers. Use them!
+- ONLY output the [TOOL: ...] blocks.
+- 120 workers available. Use them!
 """
 
 
