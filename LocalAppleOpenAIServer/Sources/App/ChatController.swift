@@ -156,10 +156,10 @@ final class ChatController: @unchecked Sendable {
                 }
             }
             
-            // FALLBACK: If structural parsing fails, check if the whole block is just SQL
+            // FALLBACK: If structural parsing fails, check if the block is PURELY SQL
             if toolCalls.isEmpty {
-                let check = trimmed.lowercased()
-                if check.contains("select ") || check.contains("describe ") || check.contains("show tables") {
+                let check = trimmed.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                if check.hasPrefix("select ") || check.hasPrefix("describe ") || check.hasPrefix("show tables") {
                     let cleanSQL = trimmed.replacingOccurrences(of: "`", with: "")
                     let dict = ["query": cleanSQL]
                     if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
