@@ -4,12 +4,11 @@ import FoundationModels
 
 @available(macOS 26.0, *)
 actor ModelWorker {
-    private let id: Int
+    let id: Int
     private let session: LanguageModelSession
     
     init(id: Int) {
         self.id = id
-        // Persistent session to avoid re-initialization overhead.
         self.session = LanguageModelSession(model: .default)
     }
     
@@ -17,11 +16,6 @@ actor ModelWorker {
         print("Worker [\(id)]: Prompt: \(prompt.count) chars")
         fflush(stdout)
         
-        // We use the stateful session. respond(to:) appends to the internal transcript.
-        // To keep it OpenAI-compatible (stateless from bridge's perspective),
-        // we should ideally clear the transcript, but since we manage context 
-        // in the prompt reconstruction, we'll just send the prompt.
-        // Note: Apple's FoundationModels often handle long context by internal pruning.
         let response = try await session.respond(to: prompt)
         
         print("Worker [\(id)]: Done.")
@@ -31,24 +25,33 @@ actor ModelWorker {
 }
 
 @available(macOS 26.0, *)
-final class ModelPool: Sendable {
-    private let workers: [ModelWorker]
+actor ModelPool {
+    private var workerDict: [Int: ModelWorker] = [:]
+    private let maxWorkers: Int
     
     init() {
-        let totalRAM = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
-        let cpuCores = ProcessInfo.processInfo.processorCount
-        // INCREASED CAP: 32 workers as requested, or based on system resources.
-        let workerCount = min(Int(totalRAM / 2), cpuCores, 32) 
+        if let envWorkers = ProcessInfo.processInfo.environment["APPLE_BRIDGE_WORKERS"], let count = Int(envWorkers) {
+            self.maxWorkers = count
+        } else {
+            self.maxWorkers = 32
+        }
         
-        print("💻 Mac Specs: \(totalRAM)GB RAM, \(cpuCores) Cores")
-        print("🧠 Model Pool: Spawning \(workerCount) workers...")
+        print("🧠 Model Pool: Dynamic mode enabled (Cap: \(maxWorkers) workers)")
         fflush(stdout)
-        
-        self.workers = (0..<workerCount).map { ModelWorker(id: $0) }
     }
     
-    func getWorker(for index: Int) -> ModelWorker {
-        return workers[index % workers.count]
+    func getWorker(for index: Int) async -> ModelWorker {
+        let workerID = index % maxWorkers
+        
+        if let existing = workerDict[workerID] {
+            return existing
+        }
+        
+        print("🚀 Model Pool: Spawning new worker [\(workerID)] on demand...")
+        fflush(stdout)
+        let newWorker = ModelWorker(id: workerID)
+        workerDict[workerID] = newWorker
+        return newWorker
     }
 }
 
@@ -95,8 +98,7 @@ final class ChatController: @unchecked Sendable {
             }
         }
         
-        // 3. Discovery Anchor (The VERY FIRST tool result, usually DESCRIBE or SHOW TABLES)
-        // This prevents the model from forgetting the schema in long conversations.
+        // 3. Discovery Anchor (The VERY FIRST tool result)
         if let firstObs = chatReq.messages.first(where: { $0.role != "user" && $0.role != "system" }) {
             discoveryAnchor = String((firstObs.content ?? "").prefix(1000))
         }
@@ -133,7 +135,7 @@ final class ChatController: @unchecked Sendable {
         print("Final Reconstructed Prompt: \(prompt.count) chars")
         fflush(stdout)
         
-        let worker = pool.getWorker(for: nextIndex())
+        let worker = await pool.getWorker(for: nextIndex())
         
         do {
             let generatedText = try await worker.respond(to: prompt)
@@ -194,7 +196,7 @@ final class ChatController: @unchecked Sendable {
         }
         let summarizeReq = try req.content.decode(SummarizeRequest.self)
         let prompt = "Squeeze this data into one core fact sentence (max 150 chars): \(summarizeReq.text.prefix(2000))\nFact:"
-        let worker = pool.getWorker(for: nextIndex())
+        let worker = await pool.getWorker(for: nextIndex())
         return try await worker.respond(to: prompt)
     }
 }
