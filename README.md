@@ -48,6 +48,8 @@ OpenPlanter supports running fully local on macOS via a dedicated Swift bridge.
 - **Auto-Boot:** If the bridge isn't running, OpenPlanter automatically launches the optimized `apple-bridge` binary.
 - **Parallel Workers:** Scales to **32 parallel sessions** for maximum concurrent sub-tasks.
 - **AI Condensation:** Automatically summarizes long conversation history using a parallel background AI worker to stay within the **4,091-token** limit.
+- **Aggressive Observation Clipping:** Automatically truncates tool outputs (SQL, shell, file reads) to 1,000 characters when in Apple mode to prevent context crashes.
+- **Discovery-First Workflow:** Forced system-level strategy that prioritizes `DESCRIBE` and `LIMIT` sampling before full data analysis.
 
 ### 🌐 OpenRouter Integration
 OpenPlanter works natively with OpenRouter. If a model name contains a `/` (e.g. `google/gemini-2.0-flash-001`), the agent automatically routes through OpenRouter using your `OPENROUTER_API_KEY`.

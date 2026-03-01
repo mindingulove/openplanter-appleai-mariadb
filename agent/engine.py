@@ -145,6 +145,7 @@ class RLMEngine:
                 minimal=(self.config.provider == "apple"),
             )
         ac = self.config.acceptance_criteria
+        self.tools.apple_mode = (self.config.provider == "apple")
         tool_defs = get_tool_definitions(
             include_subtask=self.config.recursive, 
             include_acceptance_criteria=ac,

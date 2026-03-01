@@ -40,6 +40,7 @@ class WorkspaceTools:
     command_timeout_sec: int = 45
     max_shell_output_chars: int = 16000
     shell: str = "/bin/sh"
+    apple_mode: bool = False
 
     _bg_jobs: dict[int, tuple[subprocess.Popen, Any, Path]] = field(init=False)
     _bg_next_id: int = field(init=False)
@@ -60,10 +61,12 @@ class WorkspaceTools:
         self._scope_local = threading.local()
 
     def _clip(self, text: str, max_chars: int) -> str:
-        if len(text) <= max_chars:
+        # If in Apple mode, we force a much smaller clip for all observations
+        effective_max = 1000 if self.apple_mode else max_chars
+        if len(text) <= effective_max:
             return text
-        half = max_chars // 2
-        return text[:half] + f"\n\n[... clipped {len(text) - max_chars} chars ...]\n\n" + text[-half:]
+        half = effective_max // 2
+        return text[:half] + f"\n\n[... clipped {len(text) - effective_max} chars ...]\n\n" + text[-half:]
 
     def list_files(self, glob: str | None = None) -> str:
         """List files in the workspace, optionally filtered by a glob pattern."""

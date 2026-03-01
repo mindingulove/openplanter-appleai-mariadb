@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+import requests
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -802,7 +803,6 @@ class AppleModel(OpenAICompatibleModel):
                 
             # Perform parallel summarization call
             try:
-                import requests
                 # Use the summarize endpoint we just added to the bridge
                 summarize_url = self.base_url.replace("/chat/completions", "/summarize").replace("/v1", "/v1/summarize")
                 if "/summarize" not in summarize_url: # Robustness check
