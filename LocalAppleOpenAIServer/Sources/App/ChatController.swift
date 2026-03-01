@@ -38,11 +38,9 @@ final class ChatController: @unchecked Sendable {
         var sys = "", anchor = "", goal = "", last = ""
         
         if let s = chatReq.messages.first(where: { $0.role == "system" }) { sys = String(s.content?.prefix(600) ?? "") }
-        for m in chatReq.messages {
-            let c = m.content ?? ""
-            if c.contains("Field") { await schemaCache.update(schema: "SCHEMA: id_aps, faixa_etaria, quantidade") }
-        }
         anchor = await schemaCache.get()
+        if anchor.isEmpty { anchor = "SCHEMA: (id_aps, faixa_etaria, quantidade)" }
+        
         if let g = chatReq.messages.last(where: { $0.role == "user" }) { goal = String(g.content?.prefix(400) ?? "") }
         if let l = chatReq.messages.last(where: { $0.role != "user" && $0.role != "system" }) { last = String(l.content?.prefix(600) ?? "") }
         
@@ -54,7 +52,6 @@ final class ChatController: @unchecked Sendable {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             var toolCalls: [OpenAIToolCall] = []
             
-            // IMPROVED SQL PARSER + RECOVERY
             let pattern = "(?:\\[?TOOL:\\s*)?([a-zA-Z0-9_]+)\\s*\\((.*?)\\)\\]?"
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
                 let matches = regex.matches(in: trimmed, options: [], range: NSRange(trimmed.startIndex..., in: trimmed))
@@ -63,13 +60,10 @@ final class ChatController: @unchecked Sendable {
                     var sql = String(trimmed[Range(match.range(at: 2), in: trimmed)!]).trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
                     
                     if name == "mariadb_query" {
-                        // AUTO-RECOVERY: If model forgot FROM clause
-                        if !sql.lowercased().contains("from") {
+                        let lsql = sql.lowercased()
+                        // FIX AUTO-RECOVERY: Only SELECT needs FROM
+                        if lsql.contains("select") && !lsql.contains("from") {
                             sql += " FROM vw_aps_faixa_etaria"
-                        }
-                        // AUTO-RECOVERY: If model wrote malformed count
-                        if sql.lowercased().contains("select id_aps") && !sql.lowercased().contains("sum") {
-                            sql = "SELECT id_aps, SUM(quantidade) as total FROM vw_aps_faixa_etaria WHERE faixa_etaria LIKE '%04%' GROUP BY id_aps ORDER BY total DESC LIMIT 1"
                         }
                         
                         let dict = ["query": sql]
@@ -96,8 +90,6 @@ final class ChatController: @unchecked Sendable {
 
     @Sendable
     func summarize(req: Request) async throws -> String {
-        struct SummarizeRequest: Content { let text: String }
-        let summarizeReq = try req.content.decode(SummarizeRequest.self)
-        return "Summary of data"
+        return "Summary"
     }
 }
