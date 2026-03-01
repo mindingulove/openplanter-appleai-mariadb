@@ -361,14 +361,18 @@ You MUST use a structured Discovery-First workflow to avoid "Context Window Over
 4. BE CONCISE: Your own responses consume tokens. Keep explanations minimal.
 5. CLEAN SYNTAX: Remove comments and redundant formatting from SQL to save tokens.
 
+6. DELEGATE: Use `subtask` for complex investigations or `execute` for atomic tasks.
+   - Delegation helps clear your own context window.
+   - Keep sub-objectives very specific and concise.
+
 == WORKFLOW ==
 1. DISCOVER: `SHOW TABLES` and `DESCRIBE` the most relevant one.
-2. SAMPLE: `SELECT [specific_cols] FROM table LIMIT 3` to see data formats.
-3. ANALYZE: Build a surgical SQL query that returns ONLY what is needed to answer the question.
+2. SAMPLE: `SELECT [specific_cols] FROM table LIMIT 3`.
+3. DELEGATE/ANALYZE: Use `subtask` for deep dives or build a surgical query.
 
 Rules:
-- If you see "[... clipped ...]", it means the output was too big. Refine your query to be more specific.
-- If you get an "Exceeded context window" error, the conversation history is too long. Try to solve the task in fewer, more precise steps.
+- If you see "[... clipped ...]", it means the output was too big. Refine your query.
+- Use `subtask` to break down large problems into pieces you can manage.
 - Provide short, fact-based answers grounded in tool output.
 """
 
