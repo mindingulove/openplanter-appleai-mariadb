@@ -61,7 +61,7 @@ final class ChatController: @unchecked Sendable {
         let chatReq = try req.content.decode(OpenAIChatRequest.self)
         var sys = "", anchor = "", goal = "", last = ""
         
-        if let s = chatReq.messages.first(where: { $0.role == "system" }) { sys = String((s.content ?? "").prefix(800)) }
+        if let s = chatReq.messages.first(where: { $0.role == "system" }) { sys = String((s.content ?? "").prefix(400)) }
         
         // Build Schema Anchor
         for m in chatReq.messages {
@@ -71,37 +71,39 @@ final class ChatController: @unchecked Sendable {
         anchor = await schemaCache.get()
         if anchor.isEmpty { anchor = "SCHEMA: (none discovered yet - run SHOW TABLES)" }
         
-        // Build full history log for context
-        var conversationHistory = ""
-        for msg in chatReq.messages {
-            if msg.role != "system" {
-                let roleLabel = msg.role.uppercased()
-                let contentStr = msg.content ?? ""
-                conversationHistory += "[\(roleLabel)] \(contentStr)\n"
-            }
+        var recentUserPart = ""
+        var lastObservation = ""
+        if let lastUser = chatReq.messages.last(where: { $0.role == "user" }) { recentUserPart = String((lastUser.content ?? "").prefix(400)) }
+        if let lastObs = chatReq.messages.last(where: { $0.role != "user" && $0.role != "system" }) { lastObservation = String((lastObs.content ?? "").prefix(1000)) }
+
+        let prompt: String
+        // If this is the first turn (no tool observations yet), send the full setup
+        if lastObservation.isEmpty {
+            prompt = """
+            \(sys)
+            \(anchor)
+            GOAL: \(recentUserPart)
+            Assistant:
+            """
+        } else {
+            // If we are mid-conversation, the stateful model already knows the sys and anchor.
+            // Only send the new information to prevent exponential context growth.
+            prompt = """
+            TOOL RESULT: \(lastObservation)
+            GOAL: \(recentUserPart)
+            Assistant:
+            """
         }
-        
-        // Reconstruct a comprehensive prompt without data loss but safely capped
-        let prompt = """
-        \(sys)
-        
-        \(anchor)
-        
-        --- HISTORY ---
-        \(conversationHistory.suffix(4000))
-        --- END HISTORY ---
-        
-        Assistant:
-        """
-        
+
         let workerIndex = nextIndex()
         let worker = await pool.getWorker(for: workerIndex)
-        
+
         do {
             await worker.setBusy(true)
             defer { Task { await worker.setBusy(false) } }
-            
-            let text = try await worker.respond(to: prompt)
+
+            let safePrompt = String(prompt.prefix(2000))
+            let text = try await worker.respond(to: safePrompt)
             let trimmed = text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             var toolCalls: [OpenAIToolCall] = []
             
@@ -148,7 +150,7 @@ final class ChatController: @unchecked Sendable {
             
             // FALLBACK: If structural parsing fails, check if the block is PURELY SQL
             if toolCalls.isEmpty {
-                let check = trimmed.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                let check = trimmed.lowercased().trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
                 if check.hasPrefix("select ") || check.hasPrefix("describe ") || check.hasPrefix("show tables") {
                     let cleanSQL = trimmed.replacingOccurrences(of: "`", with: "")
                     let dict = ["query": cleanSQL]
