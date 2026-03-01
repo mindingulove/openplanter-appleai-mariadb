@@ -7,10 +7,8 @@ actor ModelWorker {
     let id: Int
     private var isBusy: Bool = false
     init(id: Int) { self.id = id }
-    
     func setBusy(_ busy: Bool) { self.isBusy = busy }
     func getBusy() -> Bool { return self.isBusy }
-
     func respond(to prompt: String) async throws -> String {
         return try await Task.detached(priority: .userInitiated) {
             let session = LanguageModelSession(model: .default)
@@ -22,9 +20,7 @@ actor ModelWorker {
 @available(macOS 26.0, *)
 actor ModelPool {
     private var workerDict: [Int: ModelWorker] = [:]
-    init() {
-        for i in 0..<20 { workerDict[i] = ModelWorker(id: i) }
-    }
+    init() { for i in 0..<20 { workerDict[i] = ModelWorker(id: i) } }
     func getWorker(for index: Int) async -> ModelWorker {
         let workerID = index % 120
         if let existing = workerDict[workerID] { return existing }
@@ -34,9 +30,7 @@ actor ModelPool {
     }
     func busyWorkerCount() async -> Int {
         var count = 0
-        for worker in workerDict.values {
-            if await worker.getBusy() { count += 1 }
-        }
+        for worker in workerDict.values { if await worker.getBusy() { count += 1 } }
         return count
     }
 }
@@ -62,13 +56,10 @@ final class ChatController: @unchecked Sendable {
     @Sendable
     func createChatCompletion(req: Request) async throws -> Response {
         let chatReq = try req.content.decode(OpenAIChatRequest.self)
-        var systemPart = ""
-        var discoveryAnchor = ""
-        var recentUserPart = ""
-        var lastObservation = ""
+        var sys = "", anchor = "", goal = "", last = ""
         
-        if let sys = chatReq.messages.first(where: { $0.role == "system" }) {
-            systemPart = String((sys.content ?? "").prefix(800))
+        if let s = chatReq.messages.first(where: { $0.role == "system" }) { 
+            sys = String((s.content ?? "").prefix(800)) 
         }
 
         for msg in chatReq.messages {
@@ -83,29 +74,27 @@ final class ChatController: @unchecked Sendable {
                     }
                 }
                 if !cols.isEmpty {
-                    await schemaCache.update(schema: "SCHEMA: (\(cols.joined(separator: ", ")))")
+                    await schemaCache.update(schema: "STRUCTURE: ( \(cols.joined(separator: ", ")) )")
                 }
             }
         }
         
-        discoveryAnchor = await schemaCache.get()
-        if discoveryAnchor.isEmpty {
-            discoveryAnchor = "SCHEMA: (id_aps, faixa_etaria, quantidade)"
-        }
+        anchor = await schemaCache.get()
+        if anchor.isEmpty { anchor = "STRUCTURE: (id_aps, faixa_etaria, quantidade)" }
 
-        if let lastUser = chatReq.messages.last(where: { $0.role == "user" }) {
-            recentUserPart = String((lastUser.content ?? "").prefix(600))
+        if let lastUser = chatReq.messages.last(where: { $0.role == "user" }) { 
+            goal = String((lastUser.content ?? "").prefix(600)) 
         }
-        if let lastObs = chatReq.messages.last(where: { $0.role != "user" && $0.role != "system" }) {
-            lastObservation = String((lastObs.content ?? "").prefix(1000))
+        if let lastObs = chatReq.messages.last(where: { $0.role != "user" && $0.role != "system" }) { 
+            last = String((lastObs.content ?? "").prefix(1000)) 
         }
         
         let prompt = """
-        \(systemPart)
-        STRUCTURE: \(discoveryAnchor)
-        LAST: \(lastObservation)
-        GOAL: \(recentUserPart)
-        ACT NOW: [TOOL: name("args")]
+        \(sys)
+        \(anchor)
+        LATEST: \(last)
+        GOAL: \(goal)
+        ACT: Output [TOOL: mariadb_query("SQL")]
         Assistant:
         """
         
@@ -117,36 +106,40 @@ final class ChatController: @unchecked Sendable {
             await worker.setBusy(true)
             defer { Task { await worker.setBusy(false) } }
             
-            let generatedText = try await worker.respond(to: prompt)
-            let busyCount = await pool.busyWorkerCount()
-            let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = try await worker.respond(to: prompt)
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             
             var toolCalls: [OpenAIToolCall] = []
-            let pattern = "(?:\\[?TOOL:\\s*)?([a-zA-Z0-9_]+)\\s*\\((.*?)\\)\\]?"
+            let knownTools = ["mariadb_query", "mariadb_search", "mariadb_sample", "think", "read_file"]
+            
+            let pattern = "(?:\\[?TOOL:\\s*)?(?:name|tool)?[:\\s]*([a-zA-Z0-9_]+)\\s*\\((.*?)\\)\\]?"
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
                 let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
                 let matches = regex.matches(in: trimmed, options: [], range: nsRange)
                 for match in matches {
                     if let nameRange = Range(match.range(at: 1), in: trimmed),
                        let argsRange = Range(match.range(at: 2), in: trimmed) {
+                        
                         let name = String(trimmed[nameRange]).trimmingCharacters(in: .whitespaces)
+                        if !knownTools.contains(name) { continue }
+                        
                         let argsRaw = String(trimmed[argsRange]).trimmingCharacters(in: .whitespaces)
                         var finalArgs = "{}"
+                        
                         if argsRaw.hasPrefix("{") { finalArgs = argsRaw } 
                         else {
                             let parts = argsRaw.components(separatedBy: ",").map { 
                                 $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
                             }
                             var dict: [String: String] = [:]
-                            if name == "mariadb_query" { if parts.count >= 1 { dict["query"] = parts[0] } }
-                            else if name == "mariadb_search" {
-                                if parts.count >= 1 { dict["table"] = parts[0] }
-                                if parts.count >= 2 { dict["query"] = parts[1] }
-                            } else if name == "mariadb_sample" {
-                                if parts.count >= 1 { dict["table"] = parts[0] }
-                            } else if name == "think" {
-                                if parts.count >= 1 { dict["note"] = parts[0] }
+                            if name == "mariadb_query" { 
+                                var sql = parts[0]
+                                if !sql.lowercased().contains("from") { sql += " FROM vw_aps_faixa_etaria" }
+                                dict["query"] = sql
                             }
+                            else if name == "mariadb_sample" { dict["table"] = parts[0] }
+                            else if name == "think" { dict["note"] = parts[0] }
+                            
                             if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
                                 finalArgs = s
                             }
@@ -159,9 +152,11 @@ final class ChatController: @unchecked Sendable {
             if toolCalls.isEmpty && (trimmed.contains("SELECT") || trimmed.contains("DESCRIBE")) {
                 let sql = trimmed.components(separatedBy: "\n").first(where: { $0.contains("SELECT") || $0.contains("DESCRIBE") }) ?? trimmed
                 let cleanSQL = sql.replacingOccurrences(of: "[TOOL: ", with: "").replacingOccurrences(of: "]", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-                let dict = ["query": cleanSQL]
-                if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
-                    toolCalls.append(OpenAIToolCall(id: "call_" + UUID().uuidString.prefix(8), type: "function", function: OpenAIToolCallFunction(name: "mariadb_query", arguments: s)))
+                if !cleanSQL.isEmpty {
+                    let dict = ["query": cleanSQL]
+                    if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
+                        toolCalls.append(OpenAIToolCall(id: "call_" + UUID().uuidString.prefix(8), type: "function", function: OpenAIToolCallFunction(name: "mariadb_query", arguments: s)))
+                    }
                 }
             }
             
@@ -174,6 +169,7 @@ final class ChatController: @unchecked Sendable {
                 usage: OpenAIUsage(prompt_tokens: prompt.count/4, completion_tokens: trimmed.count/4, total_tokens: (prompt.count+trimmed.count)/4)
             )
             
+            let busyCount = await pool.busyWorkerCount()
             var rawRes = try JSONEncoder().encode(responseObj)
             if var json = try JSONSerialization.jsonObject(with: rawRes) as? [String: Any], var usage = json["usage"] as? [String: Any] {
                 usage["active_workers"] = max(busyCount, 1)
@@ -191,7 +187,5 @@ final class ChatController: @unchecked Sendable {
     }
 
     @Sendable
-    func summarize(req: Request) async throws -> String {
-        return "Summary"
-    }
+    func summarize(req: Request) async throws -> String { return "Summary" }
 }
