@@ -763,6 +763,53 @@ class OpenAICompatibleModel:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class AppleModel(OpenAICompatibleModel):
+    def condense_conversation(self, conversation: Conversation, keep_recent_turns: int = 4) -> int:
+        """Condense conversation history by summarizing old tool outputs via the local bridge."""
+        messages = conversation.get_messages()
+        # Find tool messages that haven't been condensed yet
+        tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool" and m.get("content") != "[earlier tool output condensed]"]
+        
+        if len(tool_indices) <= keep_recent_turns:
+            return 0
+            
+        to_condense = tool_indices[:-keep_recent_turns]
+        condensed_count = 0
+        
+        for idx in to_condense:
+            content = messages[idx].get("content")
+            if not content or len(content) < 100: # Don't bother summarizing tiny outputs
+                messages[idx]["content"] = "[earlier tool output condensed]"
+                condensed_count += 1
+                continue
+                
+            # Perform parallel summarization call
+            try:
+                import requests
+                # Use the summarize endpoint we just added to the bridge
+                summarize_url = self.base_url.replace("/chat/completions", "/summarize").replace("/v1", "/v1/summarize")
+                if "/summarize" not in summarize_url: # Robustness check
+                    summarize_url = self.base_url.rstrip("/") + "/summarize"
+                
+                resp = requests.post(
+                    summarize_url,
+                    json={"text": content},
+                    timeout=self.timeout_sec
+                )
+                if resp.status_code == 200:
+                    summary = resp.text.strip()
+                    messages[idx]["content"] = f"[Condensed Summary]: {summary}"
+                else:
+                    messages[idx]["content"] = "[earlier tool output condensed]"
+            except Exception:
+                messages[idx]["content"] = "[earlier tool output condensed]"
+            
+            condensed_count += 1
+            
+        return condensed_count
+
+
+@dataclass
 class AnthropicModel:
     model: str
     api_key: str

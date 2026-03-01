@@ -196,10 +196,11 @@ class RLMEngine:
                 pass
 
     def _clip_observation(self, text: str) -> str:
-        return text if len(text) <= self.config.max_observation_chars else (
-            f"{text[:self.config.max_observation_chars]}"
-            f"\n...[truncated {len(text) - self.config.max_observation_chars} chars]..."
-        )
+        max_chars = self.config.max_observation_chars
+        if len(text) <= max_chars:
+            return text
+        half = max_chars // 2
+        return text[:half] + f"\n\n[... clipped {len(text) - max_chars} chars ...]\n\n" + text[-half:]
 
     def _runtime_policy_check(self, name: str, args: dict[str, Any], depth: int) -> str | None:
         if name != "run_shell":

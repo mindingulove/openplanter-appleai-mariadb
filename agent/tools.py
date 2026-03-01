@@ -78,8 +78,8 @@ class WorkspaceTools:
     def _clip(self, text: str, max_chars: int) -> str:
         if len(text) <= max_chars:
             return text
-        omitted = len(text) - max_chars
-        return f"{text[:max_chars]}\n\n...[truncated {omitted} chars]..."
+        half = max_chars // 2
+        return text[:half] + f"\n\n[... clipped {len(text) - max_chars} chars ...]\n\n" + text[-half:]
 
     def _resolve_path(self, raw_path: str) -> Path:
         candidate = Path(raw_path)
@@ -381,6 +381,12 @@ class WorkspaceTools:
                         if not rows:
                             return "(no results)"
                         
+                        total_rows = len(rows)
+                        # If listing tables, only show first 20 to save context
+                        is_show_tables = "show tables" in query.lower()
+                        if is_show_tables and total_rows > 20:
+                            rows = list(rows[:20])
+                        
                         # Format as a table
                         headers = list(rows[0].keys())
                         col_widths = {h: len(h) for h in headers}
@@ -388,7 +394,6 @@ class WorkspaceTools:
                             for h in headers:
                                 col_widths[h] = max(col_widths[h], len(str(row[h])))
                         
-                        # Build the table string
                         lines = []
                         header_line = " | ".join(h.ljust(col_widths[h]) for h in headers)
                         lines.append(header_line)
@@ -397,6 +402,10 @@ class WorkspaceTools:
                             lines.append(" | ".join(str(row[h]).ljust(col_widths[h]) for h in headers))
                         
                         result = "\n".join(lines)
+                        
+                        if is_show_tables and total_rows > 20:
+                            result += f"\n\n[... and {total_rows - 20} more tables. Use LIMIT to see more.]"
+                        
                         return self._clip(result, self.max_shell_output_chars)
                     else:
                         connection.commit()

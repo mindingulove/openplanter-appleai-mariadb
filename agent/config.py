@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,13 +38,13 @@ class AgentConfig:
     voyage_api_key: str | None = None
     max_depth: int = 4
     max_steps_per_call: int = 100
-    max_observation_chars: int = 6000
+    max_observation_chars: int = 1000
     command_timeout_sec: int = 45
     shell: str = "/bin/sh"
-    max_files_listed: int = 400
-    max_file_chars: int = 20000
-    max_search_hits: int = 200
-    max_shell_output_chars: int = 16000
+    max_files_listed: int = 100
+    max_file_chars: int = 5000
+    max_search_hits: int = 50
+    max_shell_output_chars: int = 1000
     session_root_dir: str = ".openplanter"
     max_persisted_observations: int = 400
     max_solve_seconds: int = 0
@@ -63,21 +64,19 @@ class AgentConfig:
 
     def discover_apple_bridge(self) -> None:
         """Find or start the local Apple Intelligence bridge."""
-        # Always attempt discovery/start if provider is apple and URL is local or contains a template
         is_apple_provider = (self.provider == "apple")
         is_apple_model = (self.model and self.model.startswith("apple"))
-        is_template = "{port}" in self.apple_base_url
-        is_local_target = "127.0.0.1" in self.apple_base_url or "localhost" in self.apple_base_url or is_template
+        is_template = "{port}" in (self.apple_base_url or "")
+        is_local_target = "127.0.0.1" in (self.apple_base_url or "") or "localhost" in (self.apple_base_url or "") or is_template
         
         if not (is_apple_provider or is_apple_model):
             return
             
         if not is_local_target:
-            print(f"📡 Using remote Apple bridge at {self.apple_base_url}")
             return
 
         def find_bridge_port():
-            # 1. Check for the port file in /tmp (most reliable)
+            # 1. Check for the port file in /tmp (most reliable source of truth)
             tmp_file = Path("/tmp/openplanter_bridge_port")
             if tmp_file.exists():
                 try:
@@ -85,12 +84,12 @@ class AgentConfig:
                     if p.isdigit(): return p
                 except Exception: pass
             
-            # 2. Fallback: Scan running processes with lsof
+            # 2. Fallback: Scan running processes with ps + lsof
             try:
-                import subprocess
                 ps_out = subprocess.check_output(["ps", "aux"], text=True)
                 for line in ps_out.splitlines():
                     if "ps aux" in line: continue
+                    # Match our binary or the swift run pattern
                     if "apple-bridge" in line or "App serve" in line:
                         parts = line.split()
                         if len(parts) < 2: continue
@@ -103,45 +102,40 @@ class AgentConfig:
             except Exception: pass
             return None
 
-        # Always try to find a running one first
-        port = find_bridge_port()
+        # 3. Clean up any existing instances first to ensure a fresh session
+        # (This solves the "Exceeded context window" bug by resetting worker memory)
+        print("🛑 Cleaning up Apple Bridge processes...")
+        subprocess.run(["pkill", "-9", "apple-bridge"], capture_output=True)
+        subprocess.run(["pkill", "-9", "App"], capture_output=True)
+        try: Path("/tmp/openplanter_bridge_port").unlink(missing_ok=True)
+        except: pass
+
+        # 4. Start the bridge
+        bridge_bin = self.workspace / "agent" / "appleai" / "apple-bridge"
+        if bridge_bin.exists():
+            print(f"🛠 Starting local Apple Bridge from {bridge_bin}...")
+            subprocess.Popen(
+                [str(bridge_bin), "serve"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            # Wait up to 15 seconds for it to start and bind
+            for i in range(150):
+                time.sleep(0.1)
+                port = find_bridge_port()
+                if port:
+                    print(f"✅ Bridge started on port {port}.")
+                    if is_template:
+                        self.apple_base_url = self.apple_base_url.replace("{port}", port)
+                    else:
+                        self.apple_base_url = f"http://127.0.0.1:{port}/v1"
+                    self.apple_discovered = True
+                    return
         
-        # If not running, start it
-        if not port:
-            bridge_bin = self.workspace / "agent" / "appleai" / "apple-bridge"
-            if bridge_bin.exists():
-                import time
-                print(f"🛠 Starting local Apple Bridge...")
-                # Clean up potential zombies first
-                subprocess.run(["pkill", "-9", "apple-bridge"], capture_output=True)
-                subprocess.run(["pkill", "-9", "App"], capture_output=True)
-                try: Path("/tmp/openplanter_bridge_port").unlink(missing_ok=True)
-                except: pass
-                
-                subprocess.Popen(
-                    [str(bridge_bin), "serve"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True
-                )
-                # Wait for it to start and bind
-                for _ in range(100):
-                    time.sleep(0.1)
-                    port = find_bridge_port()
-                    if port:
-                        print(f"✅ Bridge started on port {port}.")
-                        break
-        
-        if port:
-            if is_template:
-                self.apple_base_url = self.apple_base_url.replace("{port}", port)
-            else:
-                self.apple_base_url = f"http://127.0.0.1:{port}/v1"
-            self.apple_discovered = True
-        elif is_template:
-            # If we still have a template but found no port, fallback to 8080 but warn
-            print(f"⚠️ Could not discover bridge port. Falling back to 8080.")
+        # Final fallback
+        if is_template:
             self.apple_base_url = self.apple_base_url.replace("{port}", "8080")
+            print("⚠️ Discovery failed. Defaulting to 8080.")
 
     @classmethod
     def from_env(cls, workspace: str | Path) -> "AgentConfig":
@@ -149,7 +143,6 @@ class AgentConfig:
         load_dotenv()
         ws = Path(workspace).expanduser().resolve()
         
-        # Initial env load
         provider = os.getenv("OPENPLANTER_PROVIDER", "auto").strip().lower() or "auto"
         model = os.getenv("OPENPLANTER_MODEL", "")
         
@@ -210,9 +203,9 @@ class AgentConfig:
             max_observation_chars=int(os.getenv("OPENPLANTER_MAX_OBS_CHARS", str(default_obs_chars))),
             command_timeout_sec=effective_timeout,
             shell=os.getenv("OPENPLANTER_SHELL", "/bin/sh"),
-            max_files_listed=int(os.getenv("OPENPLANTER_MAX_FILES", "400")),
-            max_file_chars=int(os.getenv("OPENPLANTER_MAX_FILE_CHARS", "20000")),
-            max_search_hits=int(os.getenv("OPENPLANTER_MAX_SEARCH_HITS", "200")),
+            max_files_listed=int(os.getenv("OPENPLANTER_MAX_FILES", "100")),
+            max_file_chars=int(os.getenv("OPENPLANTER_MAX_FILE_CHARS", "5000")),
+            max_search_hits=int(os.getenv("OPENPLANTER_MAX_SEARCH_HITS", "50")),
             max_shell_output_chars=int(os.getenv("OPENPLANTER_MAX_SHELL_CHARS", str(default_shell_chars))),
             session_root_dir=os.getenv("OPENPLANTER_SESSION_DIR", ".openplanter"),
             max_persisted_observations=int(os.getenv("OPENPLANTER_MAX_PERSISTED_OBS", "400")),

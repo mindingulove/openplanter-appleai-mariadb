@@ -11,18 +11,13 @@ actor ModelWorker {
     }
     
     func respond(to prompt: String) async throws -> String {
-        print("Worker [\(id)]: Incoming request (\(prompt.count) chars)...")
+        print("Worker [\(id)]: Generation start (\(prompt.count) chars)...")
         fflush(stdout)
         
-        // Every worker creates a fresh, isolated session
         let session = LanguageModelSession(model: .default)
-        
-        print("Worker [\(id)]: Starting generation...")
-        fflush(stdout)
-        
         let response = try await session.respond(to: prompt)
         
-        print("Worker [\(id)]: Done. Output size: \(response.content.count) chars")
+        print("Worker [\(id)]: Generation end.")
         fflush(stdout)
         return response.content
     }
@@ -35,8 +30,7 @@ final class ModelPool: Sendable {
     init() {
         let totalRAM = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
         let cpuCores = ProcessInfo.processInfo.processorCount
-        let safeModelRAM = max(0, Int(totalRAM) - 8)
-        let workerCount = min(max(1, safeModelRAM / 4), cpuCores)
+        let workerCount = min(Int(totalRAM / 2), cpuCores)
         
         print("💻 Mac Specs: \(totalRAM)GB RAM, \(cpuCores) Cores")
         print("🧠 Model Pool: Spawning \(workerCount) workers...")
@@ -57,7 +51,7 @@ final class ChatController: @unchecked Sendable {
     private let lock = NSLock()
 
     init() {
-        print("✅ Apple Foundation Model integration INITIALIZED with Resource-Aware Pooling.")
+        print("✅ Apple Foundation Model integration INITIALIZED.")
         fflush(stdout)
     }
     
@@ -72,33 +66,48 @@ final class ChatController: @unchecked Sendable {
     func createChatCompletion(req: Request) async throws -> Response {
         let chatReq = try req.content.decode(OpenAIChatRequest.self)
         
-        // --- ULTRA-AGGRESSIVE TRUNCATION ---
-        // Local Apple models (4k window) are very sensitive.
-        // We only take the LATEST message and cap it at 1000 chars (~250-300 tokens).
-        let userMessage = chatReq.messages.last?.content ?? "Hello"
-        let cappedContent = userMessage.count > 1000 ? String(userMessage.prefix(1000)) + "..." : userMessage
+        // --- PROMPT RECONSTRUCTION (Ultra-Safe) ---
+        // We strictly limit the history to avoid the 4091 token crash.
+        var prompt = ""
         
-        let prompt = """
-        Instruction: You are OpenPlanter. Use tools.
-        - `mariadb_query`: {"tool_calls": [{"id": "c1", "type": "function", "function": {"name": "mariadb_query", "arguments": "{\\"query\\": \\"SHOW TABLES;\\"}"}}]}
+        // 1. System Prompt (The Rules)
+        if let systemMsg = chatReq.messages.first(where: { $0.role == "system" }) {
+            prompt += "Instruction: \(String((systemMsg.content ?? "").prefix(800)))\n"
+        }
         
-        User: \(cappedContent)
+        // 2. Goal (The original question)
+        if let firstUserMsg = chatReq.messages.first(where: { $0.role == "user" }) {
+            prompt += "Goal: \(String((firstUserMsg.content ?? "").prefix(400)))\n"
+        }
+        
+        // 3. Current Observation (The last result)
+        if let lastMsg = chatReq.messages.last, lastMsg.role != "user" {
+            prompt += "Observation: \(String((lastMsg.content ?? "").prefix(1200)))\n"
+        }
+        
+        // 4. Force Nudge
+        prompt += """
+        
+        CRITICAL: If the 'Observation' above already answers the 'Goal', provide the final answer to the user now. 
+        If you need more info from MariaDB, use `mariadb_query`.
         Assistant:
         """
         
-        // Round-robin worker selection
         let worker = pool.getWorker(for: nextIndex())
         
         do {
             let generatedText = try await worker.respond(to: prompt)
             let finalOutput = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             
+            // Repair SQL Hallucinations
             var toolCalls: [[String: Any]]? = nil
-            if finalOutput.contains("mariadb_query") {
+            if finalOutput.contains("mariadb_query") || finalOutput.contains("SHOW TABLES") || (finalOutput.contains("SELECT") && finalOutput.contains("FROM")) {
                 var dbQuery = "SHOW TABLES;"
                 if let range = finalOutput.range(of: "SELECT", options: .caseInsensitive) {
-                    dbQuery = String(finalOutput[range.lowerBound...]).components(separatedBy: "\"")[0].components(separatedBy: "}")[0]
+                    let part = String(finalOutput[range.lowerBound...])
+                    dbQuery = part.components(separatedBy: "\n")[0].components(separatedBy: ";")[0] + ";"
                 }
+                
                 toolCalls = [[
                     "id": "call_\(UUID().uuidString.prefix(8))",
                     "type": "function",
@@ -141,8 +150,18 @@ final class ChatController: @unchecked Sendable {
             
         } catch {
             print("ChatController: ERROR - \(error)")
-            fflush(stdout)
             throw Abort(.internalServerError, reason: "Apple Foundation Model error: \(error.localizedDescription)")
         }
+    }
+
+    @Sendable
+    func summarize(req: Request) async throws -> String {
+        struct SummarizeRequest: Content {
+            let text: String
+        }
+        let summarizeReq = try req.content.decode(SummarizeRequest.self)
+        let prompt = "Instruction: Summarize this briefly (max 300 chars): \(summarizeReq.text.prefix(2000))\nSummary:"
+        let worker = pool.getWorker(for: nextIndex())
+        return try await worker.respond(to: prompt)
     }
 }

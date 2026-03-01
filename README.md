@@ -4,8 +4,10 @@ A recursive-language-model investigation agent with a terminal UI. This version 
 
 ### 🚀 How this fork differs:
 - **Local Apple Intelligence:** Native integration with macOS Sequoia+ via a dedicated Swift bridge. Run investigations fully local using Apple's Foundation Models with zero-config auto-discovery.
+- **Aggressive Parallel Processing:** The local bridge features a resource-aware worker pool that scales based on your Mac's RAM and CPU cores, enabling multiple parallel AI sessions.
+- **Smart Context Condensation:** Implements a "Parallel AI Squeeze" that automatically summarizes old tool outputs using a secondary background worker when hitting the 4,091-token limit.
 - **Direct Database Access:** Built-in support for MariaDB/MySQL. The agent treats your database as a first-class workspace component, autonomously discovering schemas and executing complex analytical queries.
-- **Deep Persistence:** Enhanced `settings.json` that remembers not just models, but custom provider URLs, database credentials, and dynamic port mappings.
+- **Deep Persistence:** Enhanced `settings.json` that remembers not just models, but custom provider URLs, database credentials, and dynamic port mappings using `{port}` templates.
 - **Optimized for Privacy:** Designed to work without cloud API keys by leveraging local silicon and local data stores.
 
 OpenPlanter ingests heterogeneous datasets — corporate registries, campaign finance records, lobbying disclosures, government contracts, and more — resolves entities across them, and surfaces non-obvious connections through evidence-backed analysis. It operates autonomously with file I/O, shell execution, web search, recursive sub-agent delegation, and direct database access. **The configured MariaDB/MySQL database is treated as an integral part of the agent's workspace.**
@@ -44,7 +46,8 @@ OpenPlanter supports running fully local on macOS via a dedicated Swift bridge.
 - **Zero-Config:** No API key is required for local use.
 - **Auto-Discovery:** Automatically detects the bridge port via `lsof` process scanning.
 - **Auto-Boot:** If the bridge isn't running, OpenPlanter automatically launches the optimized `apple-bridge` binary.
-- **Smart Defaults:** Automatically increases command timeouts to 600s for local Neural Engine processing.
+- **Parallel Workers:** Automatically scales to use multiple CPU cores for parallel sub-tasks.
+- **AI Condensation:** Automatically summarizes long conversation history using local AI to stay within hardware token limits.
 
 ### 🌐 OpenRouter Integration
 OpenPlanter works natively with OpenRouter. If a model name contains a `/` (e.g. `google/gemini-2.0-flash-001`), the agent automatically routes through OpenRouter using your `OPENROUTER_API_KEY`.
@@ -96,16 +99,11 @@ openplanter-agent [options]
 ### Database Integration
 | Flag | Description |
 |------|-------------|
-| `--use-mariadb` | **Enable MariaDB/SQL integration (default if --db is set)** |
-| `--no-mariadb` | **Disable MariaDB integration (agent will not see DB tools)** |
-| `--default-use-mariadb` | **Save MariaDB integration as enabled by default** |
-| `--default-no-mariadb` | **Save MariaDB integration as disabled by default** |
+| `--use-mariadb` | Enable MariaDB/SQL integration (default if --db is set) |
+| `--no-mariadb` | Disable MariaDB integration (agent will not see DB tools) |
+| `--default-use-mariadb` | Save MariaDB integration as enabled by default |
+| `--default-no-mariadb` | Save MariaDB integration as disabled by default |
 | `--db VAL` | Short alias for the MariaDB database name |
-| `--mariadb-host VAL` | MariaDB/MySQL hostname |
-| `--mariadb-port VAL` | MariaDB/MySQL port |
-| `--mariadb-user VAL` | MariaDB/MySQL username |
-| `--mariadb-password VAL` | MariaDB/MySQL password |
-| `--mariadb-database VAL` | Full flag for database name |
 
 ### Execution & UI
 | Flag | Description |
@@ -128,7 +126,7 @@ Inside the interactive REPL:
 | `/model list [all]` | List available models |
 | `/db NAME [--save]` | Quickly set and save the active MariaDB database |
 | `/mariadb` | Show current database configuration and status |
-| `/mariadb enable/disable` | **Toggle MariaDB integration live** |
+| `/mariadb enable/disable` | Toggle MariaDB integration live |
 | `/mariadb <key> <val>` | Set MariaDB config (host, port, user, pass, db) |
 | `/mariadb <key> <val> --save` | Set and persist database settings to `settings.json` |
 | `/reasoning LEVEL` | Change reasoning effort |
@@ -144,7 +142,7 @@ agent/
   __main__.py    CLI entry point and REPL
   engine.py      Recursive language model engine
   runtime.py     Session persistence and lifecycle
-  model.py       Provider-agnostic LLM abstraction
+  model.py       Provider-agnostic LLM abstraction (inc. AppleModel context squeeze)
   builder.py     Engine/model factory
   tools.py       Workspace tool implementations (inc. MariaDB)
   tool_defs.py   Tool JSON schemas

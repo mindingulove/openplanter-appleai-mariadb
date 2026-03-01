@@ -13,6 +13,7 @@ from .config import PROVIDER_DEFAULT_MODELS, AgentConfig
 from .engine import RLMEngine
 from .model import (
     AnthropicModel,
+    AppleModel,
     EchoFallbackModel,
     ModelError,
     OpenAICompatibleModel,
@@ -140,7 +141,7 @@ def build_model_factory(cfg: AgentConfig) -> ModelFactory | None:
                 timeout_sec=cfg.model_timeout_sec,
             )
         if provider == "apple":
-            return OpenAICompatibleModel(
+            return AppleModel(
                 model=model_name,
                 api_key=cfg.apple_api_key or "local-apple",
                 base_url=cfg.apple_base_url,
@@ -209,7 +210,7 @@ def build_engine(cfg: AgentConfig) -> RLMEngine:
             timeout_sec=cfg.model_timeout_sec,
         )
     elif cfg.provider == "apple":
-        model = OpenAICompatibleModel(
+        model = AppleModel(
             model=model_name,
             api_key=cfg.apple_api_key or "local-apple",
             base_url=cfg.apple_base_url,

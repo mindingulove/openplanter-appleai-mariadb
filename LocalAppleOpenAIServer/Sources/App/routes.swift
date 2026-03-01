@@ -10,7 +10,10 @@ func routes(_ app: Application) throws {
         
         // OpenAI-compatible endpoints
         app.post("v1", "chat", "completions", use: chatController.createChatCompletion)
-    } else {
+
+        // Internal summarization endpoint for context condensation
+        app.post("v1", "summarize", use: chatController.summarize)
+        } else {
         app.logger.critical("FoundationModels is not available on this macOS version. Upgrade to 26.0+.")
     }
 }
