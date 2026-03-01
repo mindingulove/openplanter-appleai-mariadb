@@ -16,8 +16,6 @@ actor ModelWorker {
         print("Worker [\(id)]: Thinking (High Priority)...")
         fflush(stdout)
         
-        // We only extract the 'content' string inside the detached task
-        // because the full 'Response' object is not Sendable.
         let generatedContent = try await Task.detached(priority: .userInitiated) {
             let response = try await self.session.respond(to: prompt)
             return response.content
@@ -43,7 +41,6 @@ actor ModelPool {
         
         print("🧠 Model Pool: Dynamic mode enabled (Cap: \(maxWorkers) workers)")
         
-        // PRE-WARM 20 WORKERS
         print("🔥 Pre-warming 20 workers...")
         for i in 0..<20 {
             workerDict[i] = ModelWorker(id: i)
@@ -53,11 +50,7 @@ actor ModelPool {
     
     func getWorker(for index: Int) async -> ModelWorker {
         let workerID = index % maxWorkers
-        
-        if let existing = workerDict[workerID] {
-            return existing
-        }
-        
+        if let existing = workerDict[workerID] { return existing }
         let newWorker = ModelWorker(id: workerID)
         workerDict[workerID] = newWorker
         return newWorker
@@ -90,7 +83,7 @@ final class ChatController: @unchecked Sendable {
     func createChatCompletion(req: Request) async throws -> Response {
         let chatReq = try req.content.decode(OpenAIChatRequest.self)
         
-        // --- ANCHORED PROMPT RECONSTRUCTION (ULTRA-CONSERVATIVE) ---
+        // --- ANCHORED PROMPT RECONSTRUCTION ---
         var systemPart = ""
         var toolsPart = ""
         var discoveryAnchor = ""
@@ -132,17 +125,16 @@ final class ChatController: @unchecked Sendable {
         
         \(toolsPart)
         
-        SCHEMA ANCHOR:
+        SCHEMA:
         \(discoveryAnchor)
         
-        LATEST DATA:
+        LAST RESULT:
         \(lastObservation)
         
-        USER GOAL:
+        GOAL:
         \(recentUserPart)
         
-        TASK: If LATEST DATA answers USER GOAL, provide final answer. Else:
-        CALL: tool_name({"arg": "val"})
+        ACT NOW. Use tool calls like: mariadb_query("SELECT...")
         Assistant:
         """
         
@@ -153,33 +145,65 @@ final class ChatController: @unchecked Sendable {
             let generatedText = try await worker.respond(to: prompt)
             let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            // --- ROBUST DYNAMIC TOOL CALL PARSING ---
-            var toolCalls: [OpenAIToolCall]? = nil
-            let pattern = "(?:CALL:\\s*)?([a-zA-Z0-9_]+)\\s*\\((.*)\\)"
-            if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
-                let range = NSRange(trimmed.startIndex..., in: trimmed)
-                let matches = regex.matches(in: trimmed, options: [], range: range)
+            // --- ULTRA-ROBUST TOOL CALL PARSING ---
+            var toolCalls: [OpenAIToolCall] = []
+            
+            // 1. Try to find JSON arrays first (the model likes this)
+            if trimmed.contains("[") && trimmed.contains("]") {
+                let startIdx = trimmed.firstIndex(of: "[")!
+                let endIdx = trimmed.lastIndex(of: "]")!
+                let jsonPart = String(trimmed[startIdx...endIdx])
                 
-                for match in matches {
-                    if let nameRange = Range(match.range(at: 1), in: trimmed),
-                       let argsRange = Range(match.range(at: 2), in: trimmed) {
-                        let name = String(trimmed[nameRange]).trimmingCharacters(in: .whitespaces)
-                        var args = String(trimmed[argsRange]).trimmingCharacters(in: .whitespaces)
-                        
-                        if args.hasPrefix("\"") && args.hasSuffix("\"") && !args.contains(":") {
-                            if name == "mariadb_query" || name == "mariadb_export" {
-                                args = "{\"query\": \(args)}"
-                            } else if name == "read_file" || name == "list_files" {
-                                args = "{\"path\": \(args)}"
+                if let data = jsonPart.data(using: .utf8),
+                   let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                    for item in array {
+                        let name = (item["tool"] as? String) ?? (item["name"] as? String) ?? ""
+                        if !name.isEmpty {
+                            var argsStr = "{}"
+                            if let argsObj = item["args"] ?? item["parameters"] ?? item["arguments"] {
+                                if let argsData = try? JSONSerialization.data(withJSONObject: argsObj),
+                                   let s = String(data: argsData, encoding: .utf8) {
+                                    argsStr = s
+                                }
                             }
+                            toolCalls.append(OpenAIToolCall(
+                                id: "call_" + UUID().uuidString.prefix(8),
+                                type: "function",
+                                function: OpenAIToolCallFunction(name: name, arguments: argsStr)
+                            ))
                         }
-                        
-                        if toolCalls == nil { toolCalls = [] }
-                        toolCalls?.append(OpenAIToolCall(
-                            id: "call_" + UUID().uuidString.prefix(8),
-                            type: "function",
-                            function: OpenAIToolCallFunction(name: name, arguments: args)
-                        ))
+                    }
+                }
+            }
+            
+            // 2. Fallback to Regex for name("args") format
+            if toolCalls.isEmpty {
+                let pattern = "([a-zA-Z0-9_]+)\\s*\\((.*)\\)"
+                if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
+                    let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
+                    let matches = regex.matches(in: trimmed, options: [], range: nsRange)
+                    
+                    for match in matches {
+                        if let nameRange = Range(match.range(at: 1), in: trimmed),
+                           let argsRange = Range(match.range(at: 2), in: trimmed) {
+                            let name = String(trimmed[nameRange]).trimmingCharacters(in: .whitespaces)
+                            var args = String(trimmed[argsRange]).trimmingCharacters(in: .whitespaces)
+                            
+                            // Handle simple string args: name("val") -> {"query": "val"}
+                            if args.hasPrefix("\"") && args.hasSuffix("\"") && !args.contains(":") {
+                                if name == "mariadb_query" || name == "mariadb_export" {
+                                    args = "{\"query\": \(args)}"
+                                } else if name == "read_file" || name == "list_files" {
+                                    args = "{\"path\": \(args)}"
+                                }
+                            }
+                            
+                            toolCalls.append(OpenAIToolCall(
+                                id: "call_" + UUID().uuidString.prefix(8),
+                                type: "function",
+                                function: OpenAIToolCallFunction(name: name, arguments: args)
+                            ))
+                        }
                     }
                 }
             }
@@ -194,10 +218,10 @@ final class ChatController: @unchecked Sendable {
                     index: 0,
                     message: OpenAIMessageResponse(
                         role: "assistant",
-                        content: toolCalls == nil ? trimmed : nil,
-                        tool_calls: toolCalls
+                        content: toolCalls.isEmpty ? trimmed : nil,
+                        tool_calls: toolCalls.isEmpty ? nil : toolCalls
                     ),
-                    finish_reason: toolCalls == nil ? "stop" : "tool_calls"
+                    finish_reason: toolCalls.isEmpty ? "stop" : "tool_calls"
                 )],
                 usage: OpenAIUsage(
                     prompt_tokens: prompt.count / 4,
@@ -206,7 +230,6 @@ final class ChatController: @unchecked Sendable {
                 )
             )
             
-            // DYNAMICALLY INJECT WORKER COUNT
             var rawRes = try JSONEncoder().encode(responseObj)
             if var json = try JSONSerialization.jsonObject(with: rawRes) as? [String: Any],
                var usage = json["usage"] as? [String: Any] {
