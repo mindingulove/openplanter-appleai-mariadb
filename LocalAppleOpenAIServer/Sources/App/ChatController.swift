@@ -122,13 +122,16 @@ final class ChatController: @unchecked Sendable {
                         if knownTools.contains(name) {
                             var argsRaw = String(trimmed[argsRange]).trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
                             
-                            // Strip quotes
+                            // Strip triple quotes first
+                            argsRaw = argsRaw.replacingOccurrences(of: "\"\"\"", with: "")
+                            argsRaw = argsRaw.replacingOccurrences(of: "'''", with: "")
+                            
+                            // Strip surrounding single or double quotes
                             if argsRaw.hasPrefix("\"") && argsRaw.hasSuffix("\"") {
                                 argsRaw = String(argsRaw.dropFirst().dropLast())
                             } else if argsRaw.hasPrefix("'") && argsRaw.hasSuffix("'") {
                                 argsRaw = String(argsRaw.dropFirst().dropLast())
                             }
-                            argsRaw = argsRaw.replacingOccurrences(of: "\"\"\"", with: "")
                             argsRaw = argsRaw.trimmingCharacters(in: .whitespacesAndNewlines)
                             
                             let dict = (name == "mariadb_query") ? ["query": argsRaw] : ["table": argsRaw]
