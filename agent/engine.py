@@ -421,6 +421,7 @@ class RLMEngine:
                             "input_tokens": turn.input_tokens,
                             "output_tokens": turn.output_tokens,
                             "active_workers": turn.active_workers,
+                            "worker_id": turn.worker_id,
                             "elapsed_sec": round(elapsed, 2),
                             "is_final": False,
                         }
@@ -493,6 +494,7 @@ class RLMEngine:
                     context=context, on_event=on_event, on_step=on_step,
                     deadline=deadline, current_model=model,
                     replay_logger=replay_logger,
+                    worker_id=turn.worker_id,
                 )
                 indexed_results[idx] = (result_entry, is_final_entry)
                 if is_final_entry:
@@ -516,6 +518,7 @@ class RLMEngine:
                                 replay_logger=replay_logger,
                                 parallel_group_id=group_id,
                                 parallel_owner=f"{tc.id or 'tc'}:{idx}",
+                                worker_id=turn.worker_id,
                             ): idx
                             for idx, tc in parallel
                         }
@@ -624,6 +627,7 @@ class RLMEngine:
         replay_logger: ReplayLogger | None,
         parallel_group_id: str | None = None,
         parallel_owner: str | None = None,
+        worker_id: int | None = None,
     ) -> tuple[ToolResult, bool]:
         """Run a single tool call. Returns (ToolResult, is_final)."""
         arg_summary = _summarize_args(tc.arguments)
@@ -668,6 +672,7 @@ class RLMEngine:
                         "action": {"name": tc.name, "arguments": tc.arguments},
                         "observation": observation,
                         "elapsed_sec": round(tool_elapsed, 2),
+                        "worker_id": worker_id,
                         "is_final": is_final,
                     }
                 )

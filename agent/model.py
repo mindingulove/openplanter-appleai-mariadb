@@ -47,6 +47,7 @@ class ModelTurn:
     input_tokens: int = 0
     output_tokens: int = 0
     active_workers: int | None = None
+    worker_id: int | None = None
 
 
 @dataclass
@@ -716,6 +717,7 @@ class OpenAICompatibleModel:
         input_tokens = usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0
         output_tokens = usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
         active_workers = usage.get("active_workers") if isinstance(usage, dict) else None
+        worker_id = usage.get("worker_id") if isinstance(usage, dict) else None
 
         return ModelTurn(
             tool_calls=tool_calls,
@@ -725,6 +727,7 @@ class OpenAICompatibleModel:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             active_workers=active_workers,
+            worker_id=worker_id,
         )
 
     def append_assistant_turn(self, conversation: Conversation, turn: ModelTurn) -> None:
