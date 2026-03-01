@@ -158,10 +158,8 @@ class RLMEngine:
         if is_apple:
             self.config.max_steps_per_call = 60
             essential_tools = {
-                "mariadb_query", "mariadb_export", "mariadb_search", "mariadb_sample",
-                "read_data_chunk", "summarize_data", "compress_context", 
-                "read_file", "write_file", "run_shell", 
-                "think", "list_files", "search_files", "subtask", "execute"
+                "mariadb_query", "mariadb_search", "mariadb_sample",
+                "think", "read_file"
             }
             tool_defs = [d for d in tool_defs if d["name"] in essential_tools]
             

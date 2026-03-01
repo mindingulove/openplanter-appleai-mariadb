@@ -94,6 +94,9 @@ final class ChatController: @unchecked Sendable {
         Assistant:
         """
         
+        print("Final Prompt Length: \(prompt.count) chars")
+        fflush(stdout)
+        
         let workerIndex = nextIndex()
         let worker = await pool.getWorker(for: workerIndex)
         
