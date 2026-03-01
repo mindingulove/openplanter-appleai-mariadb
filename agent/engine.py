@@ -155,7 +155,7 @@ class RLMEngine:
         )
         
         if is_apple:
-            self.config.max_steps_per_call = 30
+            self.config.max_steps_per_call = 60
             essential_tools = {
                 "mariadb_query", "mariadb_export", "read_data_chunk", "summarize_data",
                 "compress_context", "read_file", "write_file", "run_shell", 
@@ -420,7 +420,7 @@ class RLMEngine:
                             "tool_call_names": [tc.name for tc in turn.tool_calls],
                             "input_tokens": turn.input_tokens,
                             "output_tokens": turn.output_tokens,
-                            "active_workers": turn.usage.get("active_workers") if hasattr(turn, "usage") and isinstance(turn.usage, dict) else None,
+                            "active_workers": turn.active_workers,
                             "elapsed_sec": round(elapsed, 2),
                             "is_final": False,
                         }
