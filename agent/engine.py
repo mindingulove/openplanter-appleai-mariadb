@@ -146,11 +146,19 @@ class RLMEngine:
             )
         ac = self.config.acceptance_criteria
         self.tools.apple_mode = (self.config.provider == "apple")
+        
+        is_apple = (self.config.provider == "apple")
         tool_defs = get_tool_definitions(
-            include_subtask=self.config.recursive, 
-            include_acceptance_criteria=ac,
+            include_subtask=self.config.recursive and not is_apple, 
+            include_acceptance_criteria=ac and not is_apple,
             include_mariadb=self.config.use_mariadb
         )
+        
+        # Aggressively prune tools for Apple Foundation Model to save tokens
+        if is_apple:
+            essential_tools = {"mariadb_query", "read_file", "write_file", "run_shell", "think", "list_files", "search_files"}
+            tool_defs = [d for d in tool_defs if d["name"] in essential_tools]
+            
         if hasattr(self.model, "tool_defs"):
             self.model.tool_defs = tool_defs
 

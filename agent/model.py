@@ -767,17 +767,18 @@ class OpenAICompatibleModel:
 class AppleModel(OpenAICompatibleModel):
     def complete(self, conversation: Conversation) -> ModelTurn:
         """Complete a turn using the local Apple model, with aggressive pre-emptive condensation."""
-        # 1. Heuristic Token Check (Aggressive: 3 chars per token + 20% safety)
-        def estimate_tokens(msgs: list[dict[str, Any]]) -> int:
-            text = json.dumps(msgs)
-            return int(len(text) / 3 * 1.2)
+        # 1. Heuristic Token Check (Aggressive: 2.5 chars per token + 20% safety)
+        def estimate_tokens(msgs: list[dict[str, Any]], system_prompt: str, tools: list[Any] | None) -> int:
+            text = json.dumps(msgs) + system_prompt + json.dumps(tools or [])
+            return int(len(text) / 2.5 * 1.2)
 
-        # 2. Aggressively condense if we are over 2500 estimated tokens (out of 4091)
+        # 2. Aggressively condense if we are over 1800 estimated tokens (out of 4091)
         # to leave plenty of room for the response and system instructions.
         msgs = conversation.get_messages()
-        if estimate_tokens(msgs) > 2500:
-            # Condense back to 2 recent turns to clear maximum space
-            self.condense_conversation(conversation, keep_recent_turns=2)
+        est = estimate_tokens(msgs, conversation.system_prompt, self.tool_defs)
+        if est > 1800:
+            # Condense back to 1 recent turn to clear maximum space
+            self.condense_conversation(conversation, keep_recent_turns=1)
             
         # 3. Call parent completion logic
         return super().complete(conversation)
