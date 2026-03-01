@@ -14,8 +14,8 @@ actor ModelWorker {
         print("Worker [\(id)]: Thinking (High Priority)...")
         fflush(stdout)
         
-        // Sample context overflow protection: If prompt is too huge, truncate.
-        let finalPrompt = String(prompt.prefix(12000)) 
+        // Safety truncation
+        let finalPrompt = String(prompt.prefix(10000)) 
         
         return try await Task.detached(priority: .userInitiated) {
             let session = LanguageModelSession(model: .default)
@@ -68,7 +68,7 @@ final class ChatController: @unchecked Sendable {
         var lastObservation = ""
         
         if let sys = chatReq.messages.first(where: { $0.role == "system" }) {
-            systemPart = String((sys.content ?? "").prefix(800))
+            systemPart = String((sys.content ?? "").prefix(1200)) // INCREASED TO 1200
         }
         for msg in chatReq.messages {
             let content = msg.content ?? ""
@@ -83,10 +83,14 @@ final class ChatController: @unchecked Sendable {
         
         let prompt = """
         \(systemPart)
+        
+        ALLOWED TOOLS: mariadb_query, mariadb_search, mariadb_sample, think, read_file
+        
         SCHEMA: \(discoveryAnchor)
         LAST: \(lastObservation)
         GOAL: \(recentUserPart)
-        ACT NOW: [TOOL: name("args")]
+        
+        ACT NOW: Output [TOOL: mariadb_query("SQL")] to investigate.
         Assistant:
         """
         
@@ -100,7 +104,9 @@ final class ChatController: @unchecked Sendable {
             let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             
             var toolCalls: [OpenAIToolCall] = []
+            let knownTools = ["mariadb_query", "mariadb_search", "mariadb_sample", "think", "read_file", "list_files", "search_files", "subtask"]
             
+            // Matches [TOOL: name("args")] or name("args")
             let pattern = "(?:\\[?TOOL:\\s*)?([a-zA-Z0-9_]+)\\s*\\((.*?)\\)\\]?"
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
                 let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
@@ -109,31 +115,27 @@ final class ChatController: @unchecked Sendable {
                     if let nameRange = Range(match.range(at: 1), in: trimmed),
                        let argsRange = Range(match.range(at: 2), in: trimmed) {
                         let name = String(trimmed[nameRange]).trimmingCharacters(in: .whitespaces)
-                        let argsRaw = String(trimmed[argsRange]).trimmingCharacters(in: .whitespaces)
                         
+                        // VALIDATE TOOL NAME
+                        if !knownTools.contains(name) { continue }
+                        
+                        let argsRaw = String(trimmed[argsRange]).trimmingCharacters(in: .whitespaces)
                         var finalArgs = "{}"
+                        
                         if argsRaw.hasPrefix("{") { finalArgs = argsRaw } 
                         else {
-                            // SPLIT BY COMMA FOR MULTI-ARG RECOVERY
                             let parts = argsRaw.components(separatedBy: ",").map { 
                                 $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
                             }
-                            
                             var dict: [String: String] = [:]
-                            if name == "mariadb_query" || name == "mariadb_export" {
-                                if parts.count >= 1 { dict["query"] = parts[0] }
-                            } else if name == "mariadb_search" {
+                            if name == "mariadb_query" { if parts.count >= 1 { dict["query"] = parts[0] } }
+                            else if name == "mariadb_search" {
                                 if parts.count >= 1 { dict["table"] = parts[0] }
                                 if parts.count >= 2 { dict["query"] = parts[1] }
                             } else if name == "mariadb_sample" {
                                 if parts.count >= 1 { dict["table"] = parts[0] }
                             } else if name == "think" {
                                 if parts.count >= 1 { dict["note"] = parts[0] }
-                            } else if name == "read_file" || name == "list_files" || name == "search_files" {
-                                if parts.count >= 1 { dict["path"] = parts[0] }
-                                if parts.count >= 2 { dict["query"] = parts[1] }
-                            } else if name == "run_shell" {
-                                if parts.count >= 1 { dict["command"] = parts[0] }
                             }
                             
                             if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
@@ -145,16 +147,14 @@ final class ChatController: @unchecked Sendable {
                 }
             }
             
-            if toolCalls.isEmpty {
-                if let range = trimmed.range(of: "TOOL: ", options: .caseInsensitive) {
-                    let part = String(trimmed[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-                    let sql = part.components(separatedBy: "\n")[0].trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !sql.isEmpty {
-                        let dict = ["query": sql]
-                        if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
-                            toolCalls.append(OpenAIToolCall(id: "call_" + UUID().uuidString.prefix(8), type: "function", function: OpenAIToolCallFunction(name: "mariadb_query", arguments: s)))
-                        }
-                    }
+            // FALLBACK: If we missed everything but it looks like SQL
+            if toolCalls.isEmpty && (trimmed.contains("SELECT") || trimmed.contains("DESCRIBE")) {
+                let sql = trimmed.components(separatedBy: "\n").first(where: { $0.contains("SELECT") || $0.contains("DESCRIBE") }) ?? trimmed
+                let cleanSQL = sql.replacingOccurrences(of: "[TOOL: ", with: "").replacingOccurrences(of: "]", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                let dict = ["query": cleanSQL]
+                if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
+                    toolCalls.append(OpenAIToolCall(id: "call_" + UUID().uuidString.prefix(8), type: "function", function: OpenAIToolCallFunction(name: "mariadb_query", arguments: s)))
                 }
             }
             
@@ -187,7 +187,7 @@ final class ChatController: @unchecked Sendable {
     func summarize(req: Request) async throws -> String {
         struct SummarizeRequest: Content { let text: String }
         let summarizeReq = try req.content.decode(SummarizeRequest.self)
-        let prompt = "Summarize: \(summarizeReq.text.prefix(2000))"
+        let prompt = "Summarize concisely: \(summarizeReq.text.prefix(2500))\nSummary:"
         let worker = await pool.getWorker(for: nextIndex())
         return try await worker.respond(to: prompt)
     }
