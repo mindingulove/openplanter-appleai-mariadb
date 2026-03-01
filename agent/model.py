@@ -846,6 +846,7 @@ class AppleModel(OpenAICompatibleModel):
         input_tokens = usage.get("prompt_tokens", 0)
         output_tokens = usage.get("completion_tokens", 0)
         active_workers = usage.get("active_workers")
+        worker_id = usage.get("worker_id")
 
         return ModelTurn(
             tool_calls=tool_calls,
@@ -855,6 +856,7 @@ class AppleModel(OpenAICompatibleModel):
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             active_workers=active_workers,
+            worker_id=worker_id,
         )
 
     def condense_conversation(self, conversation: Conversation, keep_recent_turns: int = 2) -> int:

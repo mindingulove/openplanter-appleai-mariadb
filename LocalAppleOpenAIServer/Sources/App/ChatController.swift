@@ -5,19 +5,22 @@ import FoundationModels
 @available(macOS 26.0, *)
 actor ModelWorker {
     let id: Int
-    private let session: LanguageModelSession
     
     init(id: Int) {
         self.id = id
-        self.session = LanguageModelSession(model: .default)
     }
     
     func respond(to prompt: String) async throws -> String {
-        print("Worker [\(id)]: Thinking (High Priority)...")
+        print("Worker [\(id)]: Thinking (Fresh Session)...")
         fflush(stdout)
         
+        // Use a FRESH session for every turn. 
+        // This is critical because the Python agent sends the full conversation history.
+        // If the session is persistent, the model sees its own internal history 
+        // PLUS the history in the prompt, causing 'double-vision' and loops.
         let generatedContent = try await Task.detached(priority: .userInitiated) {
-            let response = try await self.session.respond(to: prompt)
+            let session = LanguageModelSession(model: .default)
+            let response = try await session.respond(to: prompt)
             return response.content
         }.value
         
@@ -134,7 +137,7 @@ final class ChatController: @unchecked Sendable {
         GOAL:
         \(recentUserPart)
         
-        ACT NOW. Use tool calls like: mariadb_query("SELECT...")
+        ACT NOW. Output tool calls like: mariadb_query("SELECT...")
         Assistant:
         """
         
@@ -148,13 +151,24 @@ final class ChatController: @unchecked Sendable {
             // --- ULTRA-ROBUST TOOL CALL PARSING ---
             var toolCalls: [OpenAIToolCall] = []
             
-            // 1. Try to find JSON arrays first (the model likes this)
-            if trimmed.contains("[") && trimmed.contains("]") {
-                let startIdx = trimmed.firstIndex(of: "[")!
-                let endIdx = trimmed.lastIndex(of: "]")!
-                let jsonPart = String(trimmed[startIdx...endIdx])
-                
-                if let data = jsonPart.data(using: .utf8),
+            // 1. Try to find JSON arrays (with or without markdown)
+            var cleanJSON = trimmed
+            if trimmed.contains("```") {
+                let parts = trimmed.components(separatedBy: "```")
+                for p in parts {
+                    let candidate = p.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if candidate.hasPrefix("json") {
+                        cleanJSON = String(candidate.dropFirst(4)).trimmingCharacters(in: .whitespacesAndNewlines)
+                        break
+                    } else if candidate.hasPrefix("[") {
+                        cleanJSON = candidate
+                        break
+                    }
+                }
+            }
+            
+            if cleanJSON.contains("[") && cleanJSON.contains("]") {
+                if let data = cleanJSON.data(using: .utf8),
                    let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
                     for item in array {
                         let name = (item["tool"] as? String) ?? (item["name"] as? String) ?? ""
@@ -189,7 +203,6 @@ final class ChatController: @unchecked Sendable {
                             let name = String(trimmed[nameRange]).trimmingCharacters(in: .whitespaces)
                             var args = String(trimmed[argsRange]).trimmingCharacters(in: .whitespaces)
                             
-                            // Handle simple string args: name("val") -> {"query": "val"}
                             if args.hasPrefix("\"") && args.hasSuffix("\"") && !args.contains(":") {
                                 if name == "mariadb_query" || name == "mariadb_export" {
                                     args = "{\"query\": \(args)}"
