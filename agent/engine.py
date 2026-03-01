@@ -336,8 +336,26 @@ class RLMEngine:
             try:
                 turn = model.complete(conversation)
             except ModelError as exc:
-                self._emit(f"[d{depth}/s{step}] model error: {exc}", on_event)
-                return f"Model error at depth {depth}, step {step}: {exc}"
+                # SPECIAL HANDLING FOR LOCAL APPLE MODEL CONTEXT ERRORS
+                err_str = str(exc).lower()
+                if "context window" in err_str or "context size" in err_str:
+                    self._emit(f"[d{depth}/s{step}] context overflow detected, pre-emptive condensation...", on_event)
+                    condense_fn = getattr(model, "condense_conversation", None)
+                    if condense_fn:
+                        # Force wipe all but current turn
+                        condense_fn(conversation, keep_recent_turns=0)
+                        try:
+                            # Retry the completion once with clean context
+                            turn = model.complete(conversation)
+                        except ModelError as retry_exc:
+                            self._emit(f"[d{depth}/s{step}] retry failed: {retry_exc}", on_event)
+                            return f"Model error (context overflow persistent): {retry_exc}"
+                    else:
+                        self._emit(f"[d{depth}/s{step}] model error: {exc}", on_event)
+                        return f"Model error: {exc}"
+                else:
+                    self._emit(f"[d{depth}/s{step}] model error: {exc}", on_event)
+                    return f"Model error at depth {depth}, step {step}: {exc}"
             finally:
                 if hasattr(model, "on_content_delta"):
                     model.on_content_delta = None

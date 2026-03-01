@@ -13,7 +13,7 @@ actor ModelWorker {
     }
     
     func respond(to prompt: String) async throws -> String {
-        print("Worker [\(id)]: Start (Prompt: \(prompt.count) chars)")
+        print("Worker [\(id)]: Prompt: \(prompt.count) chars")
         fflush(stdout)
         
         let response = try await session.respond(to: prompt)
@@ -29,12 +29,12 @@ final class ModelPool: Sendable {
     private let workers: [ModelWorker]
     
     init() {
-        // --- SANE SCALING FOR 16GB RAM ---
-        // Spawning 4 workers is the "Sweet Spot" for M1 16GB.
-        // It provides high concurrency without risking system freezes.
-        let workerCount = 4
+        let totalRAM = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
+        let cpuCores = ProcessInfo.processInfo.processorCount
+        let workerCount = min(Int(totalRAM / 2), cpuCores, 4) // Capped at 4 for stability
         
-        print("🧠 Optimized Pool: Spawning \(workerCount) parallel AI workers...")
+        print("💻 Mac Specs: \(totalRAM)GB RAM, \(cpuCores) Cores")
+        print("🧠 Model Pool: Spawning \(workerCount) workers...")
         fflush(stdout)
         
         self.workers = (0..<workerCount).map { ModelWorker(id: $0) }
@@ -52,7 +52,7 @@ final class ChatController: @unchecked Sendable {
     private let lock = NSLock()
 
     init() {
-        print("✅ Apple Silicon Optimized Bridge: ACTIVE (4 Workers)")
+        print("✅ Apple Foundation Model integration INITIALIZED.")
         fflush(stdout)
     }
     
@@ -67,26 +67,40 @@ final class ChatController: @unchecked Sendable {
     func createChatCompletion(req: Request) async throws -> Response {
         let chatReq = try req.content.decode(OpenAIChatRequest.self)
         
-        // --- PROMPT RECONSTRUCTION ---
-        var prompt = ""
+        // --- ULTRA-SAFE PROMPT RECONSTRUCTION ---
+        // 4091 tokens is the hard limit. 
+        // We target ~1000 tokens (approx 4000 chars) to be absolutely safe.
         
-        // 1. System Prompt (Rules)
-        if let systemMsg = chatReq.messages.first(where: { $0.role == "system" }) {
-            prompt += "Instruction: \(String((systemMsg.content ?? "").prefix(1000)))\n"
+        var systemPart = ""
+        var goalPart = ""
+        var observationPart = ""
+        
+        // 1. Identify critical components
+        if let sys = chatReq.messages.first(where: { $0.role == "system" }) {
+            systemPart = String((sys.content ?? "").prefix(1000))
         }
         
-        // 2. Goal (Original Question)
         if let firstUser = chatReq.messages.first(where: { $0.role == "user" }) {
-            prompt += "Goal: \(String((firstUser.content ?? "").prefix(1000)))\n"
+            goalPart = String((firstUser.content ?? "").prefix(800))
         }
         
-        // 3. Current Observation (The data)
+        // 3. Current Observation (the most recent tool result)
         if let last = chatReq.messages.last, last.role != "user" {
-            // Give 3000 chars to the last observation (the data)
-            prompt += "Observation: \(String((last.content ?? "").prefix(3000)))\n"
+            observationPart = String((last.content ?? "").prefix(2000))
         }
         
-        prompt += "\nAssistant:"
+        let prompt = """
+        Instruction: \(systemPart)
+        
+        Goal: \(goalPart)
+        
+        Current Data:
+        \(observationPart)
+        
+        Task: If the 'Current Data' answers the 'Goal', provide the final answer. 
+        Otherwise, use `mariadb_query` to explore further. Do NOT repeat queries.
+        Assistant:
+        """
         
         let worker = pool.getWorker(for: nextIndex())
         
@@ -94,16 +108,16 @@ final class ChatController: @unchecked Sendable {
             let generatedText = try await worker.respond(to: prompt)
             let finalOutput = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            // Reparation logic for tool calls
+            // Repair tool calls
             var toolCalls: [[String: Any]]? = nil
             if finalOutput.contains("mariadb_query") || finalOutput.contains("SELECT") || finalOutput.contains("SHOW TABLES") {
                 var dbQuery = "SHOW TABLES;"
                 if let range = finalOutput.range(of: "SELECT", options: .caseInsensitive) {
                     let part = String(finalOutput[range.lowerBound...])
-                    dbQuery = part.components(separatedBy: "\n")[0].components(separatedBy: "`")[0].components(separatedBy: "\"")[0].components(separatedBy: ";")[0] + ";"
+                    dbQuery = part.components(separatedBy: "\n")[0].components(separatedBy: ";")[0] + ";"
                 } else if let range = finalOutput.range(of: "DESCRIBE", options: .caseInsensitive) {
                     let part = String(finalOutput[range.lowerBound...])
-                    dbQuery = part.components(separatedBy: "\n")[0].components(separatedBy: "`")[0].components(separatedBy: "\"")[0].components(separatedBy: ";")[0] + ";"
+                    dbQuery = part.components(separatedBy: "\n")[0].components(separatedBy: ";")[0] + ";"
                 }
                 
                 toolCalls = [[
@@ -158,7 +172,7 @@ final class ChatController: @unchecked Sendable {
             let text: String
         }
         let summarizeReq = try req.content.decode(SummarizeRequest.self)
-        let prompt = "Summarize the following technical findings briefly (max 300 chars): \(summarizeReq.text.prefix(3000))"
+        let prompt = "Squeeze this data into one core fact sentence (max 150 chars): \(summarizeReq.text.prefix(2000))\nFact:"
         let worker = pool.getWorker(for: nextIndex())
         return try await worker.respond(to: prompt)
     }

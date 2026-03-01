@@ -16,3 +16,5 @@ LocalAppleOpenAIServer/.build/
 **/.DS_Store
 .DS_Store
 
+.gittoken
+\n.gittoken
