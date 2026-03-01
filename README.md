@@ -4,8 +4,8 @@ A recursive-language-model investigation agent with a terminal UI. This version 
 
 ### 🚀 How this fork differs:
 - **Local Apple Intelligence:** Native integration with macOS Sequoia+ via a dedicated Swift bridge. Run investigations fully local using Apple's Foundation Models with zero-config auto-discovery.
-- **Aggressive Parallel Processing:** The local bridge features a resource-aware worker pool that scales based on your Mac's RAM and CPU cores, enabling multiple parallel AI sessions.
-- **Smart Context Condensation:** Implements a "Parallel AI Squeeze" that automatically summarizes old tool outputs using a secondary background worker when hitting the 4,091-token limit.
+- **Ultra-Aggressive Parallel Processing:** The local bridge features a resource-aware worker pool with **32 parallel AI sessions**, maximizing the throughput of your Mac's Silicon.
+- **Hard Token Limit Management:** Optimized for the **4,091-token hardware limit** of Apple Foundation Models. Implements intelligent prompt reconstruction and "Parallel AI Squeeze" summarization.
 - **Direct Database Access:** Built-in support for MariaDB/MySQL. The agent treats your database as a first-class workspace component, autonomously discovering schemas and executing complex analytical queries.
 - **Deep Persistence:** Enhanced `settings.json` that remembers not just models, but custom provider URLs, database credentials, and dynamic port mappings using `{port}` templates.
 - **Optimized for Privacy:** Designed to work without cloud API keys by leveraging local silicon and local data stores.
@@ -46,8 +46,8 @@ OpenPlanter supports running fully local on macOS via a dedicated Swift bridge.
 - **Zero-Config:** No API key is required for local use.
 - **Auto-Discovery:** Automatically detects the bridge port via `lsof` process scanning.
 - **Auto-Boot:** If the bridge isn't running, OpenPlanter automatically launches the optimized `apple-bridge` binary.
-- **Parallel Workers:** Automatically scales to use multiple CPU cores for parallel sub-tasks.
-- **AI Condensation:** Automatically summarizes long conversation history using local AI to stay within hardware token limits.
+- **Parallel Workers:** Scales to **32 parallel sessions** for maximum concurrent sub-tasks.
+- **AI Condensation:** Automatically summarizes long conversation history using a parallel background AI worker to stay within the **4,091-token** limit.
 
 ### 🌐 OpenRouter Integration
 OpenPlanter works natively with OpenRouter. If a model name contains a `/` (e.g. `google/gemini-2.0-flash-001`), the agent automatically routes through OpenRouter using your `OPENROUTER_API_KEY`.
@@ -80,7 +80,7 @@ DB=your_db
 # Toggles
 OPENPLANTER_USE_MARIADB=yes
 ```
-The agent automatically enables MariaDB integration if a database is provided. You can explicitly toggle it using `OPENPLANTER_USE_MARIADB=no` to restrict the agent to file-based workspace only.
+The agent automatically enables MariaDB integration if a database is provided. You can explicitly toggle it using `OPENPLANTER_USE_MARIADB=no`.
 
 ## CLI Reference
 

@@ -60,6 +60,7 @@ _MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "gpt-4o": 128_000,
     "gpt-4.1": 1_000_000,
     "gpt-5-turbo-16k": 16_000,
+    "apple-foundation-model": 4_000,
 }
 _DEFAULT_CONTEXT_WINDOW = 128_000
 _CONDENSATION_THRESHOLD = 0.75

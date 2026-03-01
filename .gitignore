@@ -13,3 +13,6 @@ build/
 .venv/
 .github_token
 LocalAppleOpenAIServer/.build/
+**/.DS_Store
+.DS_Store
+

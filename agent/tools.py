@@ -149,10 +149,11 @@ class WorkspaceTools:
                         
                         if is_show_tables:
                             # Return a simpler format for table lists (headerless bullet points)
-                            table_names = [str(list(row.values())[0]) for row in rows[:30]]
+                            # Increased limit to 100 to show entire typical schemas
+                            table_names = [str(list(row.values())[0]) for row in rows[:100]]
                             result = "Tables found in database:\n" + "\n".join(f"- {name}" for name in table_names)
-                            if total_rows > 30:
-                                result += f"\n\n[... and {total_rows - 30} more tables. Use LIMIT to see more.]"
+                            if total_rows > 100:
+                                result += f"\n\n[... and {total_rows - 100} more tables. Use LIMIT to see more.]"
                             return self._clip(result, self.max_shell_output_chars)
 
                         # Normal table formatting for other queries

@@ -38,13 +38,13 @@ class AgentConfig:
     voyage_api_key: str | None = None
     max_depth: int = 4
     max_steps_per_call: int = 100
-    max_observation_chars: int = 1000
+    max_observation_chars: int = 5000
     command_timeout_sec: int = 45
     shell: str = "/bin/sh"
     max_files_listed: int = 100
     max_file_chars: int = 5000
     max_search_hits: int = 50
-    max_shell_output_chars: int = 1000
+    max_shell_output_chars: int = 5000
     session_root_dir: str = ".openplanter"
     max_persisted_observations: int = 400
     max_solve_seconds: int = 0
@@ -158,8 +158,8 @@ class AgentConfig:
         model_timeout_env = os.getenv("OPENPLANTER_MODEL_TIMEOUT")
         effective_model_timeout = int(model_timeout_env) if model_timeout_env else default_model_timeout
         
-        default_obs_chars = 1000 if is_apple_active else 6000
-        default_shell_chars = 1000 if is_apple_active else 16000
+        default_obs_chars = 5000 if is_apple_active else 6000
+        default_shell_chars = 5000 if is_apple_active else 16000
 
         mariadb_db = os.getenv("MARIADB_DATABASE") or os.getenv("OPENPLANTER_DB") or os.getenv("DB")
         use_mariadb_env = os.getenv("OPENPLANTER_USE_MARIADB", "").strip().lower()

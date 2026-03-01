@@ -5,19 +5,20 @@ import FoundationModels
 @available(macOS 26.0, *)
 actor ModelWorker {
     private let id: Int
+    private let session: LanguageModelSession
     
     init(id: Int) {
         self.id = id
+        self.session = LanguageModelSession(model: .default)
     }
     
     func respond(to prompt: String) async throws -> String {
-        print("Worker [\(id)]: Active (Prompt: \(prompt.count) chars)")
+        print("Worker [\(id)]: Start (Prompt: \(prompt.count) chars)")
         fflush(stdout)
         
-        let session = LanguageModelSession(model: .default)
         let response = try await session.respond(to: prompt)
         
-        print("Worker [\(id)]: Generation complete.")
+        print("Worker [\(id)]: Done.")
         fflush(stdout)
         return response.content
     }
@@ -28,12 +29,12 @@ final class ModelPool: Sendable {
     private let workers: [ModelWorker]
     
     init() {
-        let totalRAM = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
-        let cpuCores = ProcessInfo.processInfo.processorCount
-        let workerCount = min(Int(totalRAM / 2), cpuCores)
+        // --- SANE SCALING FOR 16GB RAM ---
+        // Spawning 4 workers is the "Sweet Spot" for M1 16GB.
+        // It provides high concurrency without risking system freezes.
+        let workerCount = 4
         
-        print("💻 Mac Specs: \(totalRAM)GB RAM, \(cpuCores) Cores")
-        print("🧠 Model Pool: \(workerCount) workers ready.")
+        print("🧠 Optimized Pool: Spawning \(workerCount) parallel AI workers...")
         fflush(stdout)
         
         self.workers = (0..<workerCount).map { ModelWorker(id: $0) }
@@ -51,7 +52,7 @@ final class ChatController: @unchecked Sendable {
     private let lock = NSLock()
 
     init() {
-        print("✅ Apple Foundation Model integration INITIALIZED with Contextual Linking.")
+        print("✅ Apple Silicon Optimized Bridge: ACTIVE (4 Workers)")
         fflush(stdout)
     }
     
@@ -66,56 +67,26 @@ final class ChatController: @unchecked Sendable {
     func createChatCompletion(req: Request) async throws -> Response {
         let chatReq = try req.content.decode(OpenAIChatRequest.self)
         
-        // --- INTELLIGENT PROMPT RECONSTRUCTION ---
-        // Instead of aggressive truncation, we build a structured "Thought Context"
-        // 4091 tokens ≈ 16,000 characters. We'll be conservative and aim for 8,000 chars total.
+        // --- PROMPT RECONSTRUCTION ---
+        var prompt = ""
         
-        var systemRules = ""
-        var originalGoal = ""
-        var latestObservation = ""
-        var middleContext = ""
-        
-        // 1. Identify critical components
-        if let sys = chatReq.messages.first(where: { $0.role == "system" }) {
-            systemRules = String((sys.content ?? "").prefix(1500))
+        // 1. System Prompt (Rules)
+        if let systemMsg = chatReq.messages.first(where: { $0.role == "system" }) {
+            prompt += "Instruction: \(String((systemMsg.content ?? "").prefix(1000)))\n"
         }
         
+        // 2. Goal (Original Question)
         if let firstUser = chatReq.messages.first(where: { $0.role == "user" }) {
-            originalGoal = String((firstUser.content ?? "").prefix(1000))
+            prompt += "Goal: \(String((firstUser.content ?? "").prefix(1000)))\n"
         }
         
-        if let lastMsg = chatReq.messages.last, lastMsg.role != "user" {
-            latestObservation = String((lastMsg.content ?? "").prefix(3000))
+        // 3. Current Observation (The data)
+        if let last = chatReq.messages.last, last.role != "user" {
+            // Give 3000 chars to the last observation (the data)
+            prompt += "Observation: \(String((last.content ?? "").prefix(3000)))\n"
         }
         
-        // 2. Fill the gap with recent history (if space permits)
-        let remainingMessages = chatReq.messages.dropFirst().dropLast()
-        if !remainingMessages.isEmpty {
-            let recent = remainingMessages.suffix(3)
-            for m in recent {
-                middleContext += "\(m.role.capitalized): \(String((m.content ?? "").prefix(500)))\n"
-            }
-        }
-        
-        // 3. Assemble the Structured Prompt
-        let prompt = """
-        Instruction: \(systemRules)
-        
-        Goal: \(originalGoal)
-        
-        Recent Context:
-        \(middleContext)
-        
-        Current Observation:
-        \(latestObservation)
-        
-        CRITICAL INSTRUCTION:
-        If the 'Current Observation' contains the answer to the 'Goal', provide the final answer to the user now.
-        If you need more information (e.g. table details or query results), use the `mariadb_query` tool.
-        Do NOT repeat the same query if the result is already in the 'Recent Context' or 'Observation'.
-        
-        Assistant:
-        """
+        prompt += "\nAssistant:"
         
         let worker = pool.getWorker(for: nextIndex())
         
@@ -123,14 +94,18 @@ final class ChatController: @unchecked Sendable {
             let generatedText = try await worker.respond(to: prompt)
             let finalOutput = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            // Reparation logic for tool calls (if model wrote markdown instead of JSON)
+            // Reparation logic for tool calls
             var toolCalls: [[String: Any]]? = nil
-            if finalOutput.contains("mariadb_query") || finalOutput.contains("SELECT") {
+            if finalOutput.contains("mariadb_query") || finalOutput.contains("SELECT") || finalOutput.contains("SHOW TABLES") {
                 var dbQuery = "SHOW TABLES;"
                 if let range = finalOutput.range(of: "SELECT", options: .caseInsensitive) {
                     let part = String(finalOutput[range.lowerBound...])
                     dbQuery = part.components(separatedBy: "\n")[0].components(separatedBy: "`")[0].components(separatedBy: "\"")[0].components(separatedBy: ";")[0] + ";"
+                } else if let range = finalOutput.range(of: "DESCRIBE", options: .caseInsensitive) {
+                    let part = String(finalOutput[range.lowerBound...])
+                    dbQuery = part.components(separatedBy: "\n")[0].components(separatedBy: "`")[0].components(separatedBy: "\"")[0].components(separatedBy: ";")[0] + ";"
                 }
+                
                 toolCalls = [[
                     "id": "call_\(UUID().uuidString.prefix(8))",
                     "type": "function",
@@ -183,7 +158,7 @@ final class ChatController: @unchecked Sendable {
             let text: String
         }
         let summarizeReq = try req.content.decode(SummarizeRequest.self)
-        let prompt = "Instruction: Summarize this briefly (max 300 chars): \(summarizeReq.text.prefix(2000))\nSummary:"
+        let prompt = "Summarize the following technical findings briefly (max 300 chars): \(summarizeReq.text.prefix(3000))"
         let worker = pool.getWorker(for: nextIndex())
         return try await worker.respond(to: prompt)
     }
