@@ -365,13 +365,15 @@ When you have found the answer in the database, STOP calling tools and just writ
 == ALLOWED TOOLS ==
 CALL_mariadb_query, CALL_mariadb_search, CALL_mariadb_sample, CALL_think, CALL_read_file
 
-== WORKFLOW ==
-1. CALL_mariadb_query("SELECT id_aps, SUM(quantidade) as total FROM vw_aps_faixa_etaria WHERE faixa_etaria LIKE '%04%' GROUP BY id_aps ORDER BY total DESC LIMIT 1")
-2. Analyze and provide final answer.
+== DYNAMIC WORKFLOW ==
+1. CALL_mariadb_query("SHOW TABLES")
+2. CALL_mariadb_query("DESCRIBE chosen_table")
+3. CALL_mariadb_query("SELECT ... FROM chosen_table LIMIT 5")
+4. Analyze and provide final answer.
 
 Rules:
 - NO chatter when calling tools.
-- Use EXACT table names from the goal.
+- Figure out which table to use based on SHOW TABLES.
 """
 
 

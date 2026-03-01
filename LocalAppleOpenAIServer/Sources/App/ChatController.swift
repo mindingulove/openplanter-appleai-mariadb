@@ -69,7 +69,7 @@ final class ChatController: @unchecked Sendable {
             if c.contains("Field") { await schemaCache.update(schema: "SCHEMA: id_aps, faixa_etaria, quantidade") }
         }
         anchor = await schemaCache.get()
-        if anchor.isEmpty { anchor = "SCHEMA: (id_aps, faixa_etaria, quantidade)" }
+        if anchor.isEmpty { anchor = "SCHEMA: (none discovered yet - run SHOW TABLES)" }
         
         // Build full history log for context
         var conversationHistory = ""
@@ -133,13 +133,6 @@ final class ChatController: @unchecked Sendable {
                                         argsRaw = String(argsRaw.dropFirst().dropLast())
                                     } else if argsRaw.hasPrefix("'") && argsRaw.hasSuffix("'") {
                                         argsRaw = String(argsRaw.dropFirst().dropLast())
-                                    }
-                                    
-                                    if name == "mariadb_query" {
-                                        let lsql = argsRaw.lowercased()
-                                        if lsql.contains("select") && !lsql.contains("from") {
-                                            argsRaw += " FROM vw_aps_faixa_etaria"
-                                        }
                                     }
                                     
                                     let dict = (name == "mariadb_query") ? ["query": argsRaw] : ["table": argsRaw]
