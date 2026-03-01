@@ -187,7 +187,19 @@ final class ChatController: @unchecked Sendable {
             return res
         } catch {
             print("ChatController Error: \(error)")
-            throw Abort(.internalServerError, reason: "Apple Bridge Error: \(error.localizedDescription)")
+            let errorMessage = "SYSTEM ERROR: \(error.localizedDescription). If this is a language error, try translating your query or data into English."
+            let responseObj = OpenAIChatResponse(
+                id: "chatcmpl-" + UUID().uuidString,
+                object: "chat.completion",
+                created: Int(Date().timeIntervalSince1970),
+                model: chatReq.model,
+                choices: [OpenAIChoice(index: 0, message: OpenAIMessageResponse(role: "assistant", content: errorMessage, tool_calls: nil), finish_reason: "stop")],
+                usage: OpenAIUsage(prompt_tokens: 0, completion_tokens: 0, total_tokens: 0)
+            )
+            let rawRes = try! JSONEncoder().encode(responseObj)
+            let res = Response(status: .ok, body: .init(data: rawRes))
+            res.headers.replaceOrAdd(name: "Content-Type", value: "application/json")
+            return res
         }
     }
 
