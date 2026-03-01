@@ -109,39 +109,29 @@ final class ChatController: @unchecked Sendable {
             
             let knownTools = ["mariadb_query", "mariadb_search", "mariadb_sample", "think", "read_file"]
             
-            // --- STRUCTURAL PARSING (BULLETPROOF) ---
-            let lines = trimmed.components(separatedBy: "\n")
-            for line in lines {
-                let cleanLine = line.trimmingCharacters(in: CharacterSet.whitespaces)
-                
-                // Look for CALL_toolname("args")
-                if cleanLine.contains("CALL_") && cleanLine.contains("(") {
-                    let parts = cleanLine.components(separatedBy: "CALL_")
-                    if parts.count > 1 {
-                        let remainder = parts[1] // e.g. "mariadb_query("SELECT...")"
-                        if let parenIdx = remainder.firstIndex(of: "(") {
-                            let name = String(remainder[..<parenIdx]).trimmingCharacters(in: CharacterSet.whitespaces)
+            // --- STRUCTURAL PARSING (BULLETPROOF & MULTI-LINE) ---
+            let pattern = "CALL_([a-zA-Z0-9_]+)\\s*\\((.*?)\\)"
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
+                let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
+                let matches = regex.matches(in: trimmed, options: [], range: nsRange)
+                for match in matches {
+                    if let nameRange = Range(match.range(at: 1), in: trimmed),
+                       let argsRange = Range(match.range(at: 2), in: trimmed) {
+                        let name = String(trimmed[nameRange]).trimmingCharacters(in: CharacterSet.whitespaces)
+                        
+                        if knownTools.contains(name) {
+                            var argsRaw = String(trimmed[argsRange]).trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
                             
-                            // HARD FILTER: Must be a known tool
-                            if knownTools.contains(name) {
-                                // Extract everything after the first '('
-                                let afterParen = remainder[remainder.index(after: parenIdx)...]
-                                // Find the last ')' to handle nested parentheses (like COUNT(*))
-                                if let lastParenIdx = afterParen.lastIndex(of: ")") {
-                                    var argsRaw = String(afterParen[..<lastParenIdx]).trimmingCharacters(in: CharacterSet.whitespaces)
-                                    
-                                    // Strip quotes
-                                    if argsRaw.hasPrefix("\"") && argsRaw.hasSuffix("\"") {
-                                        argsRaw = String(argsRaw.dropFirst().dropLast())
-                                    } else if argsRaw.hasPrefix("'") && argsRaw.hasSuffix("'") {
-                                        argsRaw = String(argsRaw.dropFirst().dropLast())
-                                    }
-                                    
-                                    let dict = (name == "mariadb_query") ? ["query": argsRaw] : ["table": argsRaw]
-                                    if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
-                                        toolCalls.append(OpenAIToolCall(id: "call_" + UUID().uuidString.prefix(8), type: "function", function: OpenAIToolCallFunction(name: name, arguments: s)))
-                                    }
-                                }
+                            // Strip quotes
+                            if argsRaw.hasPrefix("\"") && argsRaw.hasSuffix("\"") {
+                                argsRaw = String(argsRaw.dropFirst().dropLast())
+                            } else if argsRaw.hasPrefix("'") && argsRaw.hasSuffix("'") {
+                                argsRaw = String(argsRaw.dropFirst().dropLast())
+                            }
+                            
+                            let dict = (name == "mariadb_query") ? ["query": argsRaw] : ["table": argsRaw]
+                            if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
+                                toolCalls.append(OpenAIToolCall(id: "call_" + UUID().uuidString.prefix(8), type: "function", function: OpenAIToolCallFunction(name: name, arguments: s)))
                             }
                         }
                     }
