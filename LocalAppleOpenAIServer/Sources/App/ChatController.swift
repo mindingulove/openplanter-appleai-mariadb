@@ -5,12 +5,36 @@ import FoundationModels
 @available(macOS 26.0, *)
 actor ModelWorker {
     let id: Int
+    private var isBusy: Bool = false
     init(id: Int) { self.id = id }
+    func setBusy(_ busy: Bool) { self.isBusy = busy }
+    func getBusy() -> Bool { return self.isBusy }
     func respond(to prompt: String) async throws -> String {
         return try await Task.detached(priority: .userInitiated) {
             let session = LanguageModelSession(model: .default)
-            return try await session.respond(to: String(prompt.prefix(8000))).content
+            // Limit to roughly 3k tokens of characters to avoid 500 errors
+            let safePrompt = String(prompt.prefix(12000))
+            let response = try await session.respond(to: safePrompt)
+            return response.content
         }.value
+    }
+}
+
+@available(macOS 26.0, *)
+actor ModelPool {
+    private var workerDict: [Int: ModelWorker] = [:]
+    init() { for i in 0..<20 { workerDict[i] = ModelWorker(id: i) } }
+    func getWorker(for index: Int) async -> ModelWorker {
+        let workerID = index % 120
+        if let existing = workerDict[workerID] { return existing }
+        let newWorker = ModelWorker(id: workerID)
+        workerDict[workerID] = newWorker
+        return newWorker
+    }
+    func busyWorkerCount() async -> Int {
+        var count = 0
+        for worker in workerDict.values { if await worker.getBusy() { count += 1 } }
+        return count
     }
 }
 
@@ -23,7 +47,7 @@ actor SchemaCache {
 
 @available(macOS 26.0, *)
 final class ChatController: @unchecked Sendable {
-    private let pool = (0..<20).map { ModelWorker(id: $0) }
+    private let pool = ModelPool()
     private let schemaCache = SchemaCache()
     private var counter: Int = 0
     private let lock = NSLock()
@@ -37,7 +61,7 @@ final class ChatController: @unchecked Sendable {
         let chatReq = try req.content.decode(OpenAIChatRequest.self)
         var sys = "", anchor = "", goal = "", last = ""
         
-        if let s = chatReq.messages.first(where: { $0.role == "system" }) { sys = String(s.content?.prefix(600) ?? "") }
+        if let s = chatReq.messages.first(where: { $0.role == "system" }) { sys = String((s.content ?? "").prefix(800)) }
         
         // Build Schema Anchor
         for m in chatReq.messages {
@@ -47,15 +71,39 @@ final class ChatController: @unchecked Sendable {
         anchor = await schemaCache.get()
         if anchor.isEmpty { anchor = "SCHEMA: (id_aps, faixa_etaria, quantidade)" }
         
-        if let g = chatReq.messages.last(where: { $0.role == "user" }) { goal = String(g.content?.prefix(400) ?? "") }
-        if let l = chatReq.messages.last(where: { $0.role != "user" && $0.role != "system" }) { last = String(l.content?.prefix(600) ?? "") }
+        // Build full history log for context
+        var conversationHistory = ""
+        for msg in chatReq.messages {
+            if msg.role != "system" {
+                let roleLabel = msg.role.uppercased()
+                let contentStr = msg.content ?? ""
+                conversationHistory += "[\(roleLabel)] \(contentStr)\n"
+            }
+        }
         
-        let prompt = "\(sys)\n\(anchor)\nLAST: \(last)\nGOAL: \(goal)\nACT: CALL_mariadb_query(\"SQL\")"
-        let worker = pool[nextIndex() % 20]
+        // Reconstruct a comprehensive prompt without data loss but safely capped
+        let prompt = """
+        \(sys)
+        
+        \(anchor)
+        
+        --- HISTORY ---
+        \(conversationHistory.suffix(4000))
+        --- END HISTORY ---
+        
+        REMINDER: Output ONLY: CALL_mariadb_query("SQL")
+        Assistant:
+        """
+        
+        let workerIndex = nextIndex()
+        let worker = await pool.getWorker(for: workerIndex)
         
         do {
+            await worker.setBusy(true)
+            defer { Task { await worker.setBusy(false) } }
+            
             let text = try await worker.respond(to: prompt)
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmed = text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             var toolCalls: [OpenAIToolCall] = []
             
             let knownTools = ["mariadb_query", "mariadb_search", "mariadb_sample", "think", "read_file"]
@@ -63,7 +111,7 @@ final class ChatController: @unchecked Sendable {
             // --- STRUCTURAL PARSING (BULLETPROOF) ---
             let lines = trimmed.components(separatedBy: "\n")
             for line in lines {
-                let cleanLine = line.trimmingCharacters(in: .whitespaces)
+                let cleanLine = line.trimmingCharacters(in: CharacterSet.whitespaces)
                 
                 // Look for CALL_toolname("args")
                 if cleanLine.contains("CALL_") && cleanLine.contains("(") {
@@ -71,7 +119,7 @@ final class ChatController: @unchecked Sendable {
                     if parts.count > 1 {
                         let remainder = parts[1] // e.g. "mariadb_query("SELECT...")"
                         if let parenIdx = remainder.firstIndex(of: "(") {
-                            let name = String(remainder[..<parenIdx]).trimmingCharacters(in: .whitespaces)
+                            let name = String(remainder[..<parenIdx]).trimmingCharacters(in: CharacterSet.whitespaces)
                             
                             // HARD FILTER: Must be a known tool
                             if knownTools.contains(name) {
@@ -79,7 +127,7 @@ final class ChatController: @unchecked Sendable {
                                 let afterParen = remainder[remainder.index(after: parenIdx)...]
                                 // Find the last ')' to handle nested parentheses (like COUNT(*))
                                 if let lastParenIdx = afterParen.lastIndex(of: ")") {
-                                    var argsRaw = String(afterParen[..<lastParenIdx]).trimmingCharacters(in: .whitespaces)
+                                    var argsRaw = String(afterParen[..<lastParenIdx]).trimmingCharacters(in: CharacterSet.whitespaces)
                                     
                                     // Strip quotes
                                     if argsRaw.hasPrefix("\"") && argsRaw.hasSuffix("\"") {
@@ -130,17 +178,19 @@ final class ChatController: @unchecked Sendable {
                 usage: OpenAIUsage(prompt_tokens: prompt.count/4, completion_tokens: trimmed.count/4, total_tokens: (prompt.count+trimmed.count)/4)
             )
             
+            let busyCount = await pool.busyWorkerCount()
             var rawRes = try JSONEncoder().encode(responseObj)
             if var json = try JSONSerialization.jsonObject(with: rawRes) as? [String: Any], var usage = json["usage"] as? [String: Any] {
-                usage["active_workers"] = 1
-                usage["worker_id"] = nextIndex() % 20
+                usage["active_workers"] = max(busyCount, 1)
+                usage["worker_id"] = workerIndex % 120
                 json["usage"] = usage
                 rawRes = try JSONSerialization.data(withJSONObject: json)
             }
             let res = Response(status: .ok, body: .init(data: rawRes))
-            res.headers.replaceOrAdd(name: .contentType, value: "application/json")
+            res.headers.replaceOrAdd(name: "Content-Type", value: "application/json")
             return res
         } catch {
+            print("ChatController Error: \(error)")
             throw Abort(.internalServerError, reason: "Apple Bridge Error: \(error.localizedDescription)")
         }
     }
