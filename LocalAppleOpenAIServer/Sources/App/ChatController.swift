@@ -128,6 +128,8 @@ final class ChatController: @unchecked Sendable {
                             } else if argsRaw.hasPrefix("'") && argsRaw.hasSuffix("'") {
                                 argsRaw = String(argsRaw.dropFirst().dropLast())
                             }
+                            argsRaw = argsRaw.replacingOccurrences(of: "\"\"\"", with: "")
+                            argsRaw = argsRaw.trimmingCharacters(in: .whitespacesAndNewlines)
                             
                             let dict = (name == "mariadb_query") ? ["query": argsRaw] : ["table": argsRaw]
                             if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
