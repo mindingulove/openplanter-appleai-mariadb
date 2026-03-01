@@ -121,7 +121,7 @@ final class ChatController: @unchecked Sendable {
         GOAL:
         \(recentUserPart)
         
-        ACTION: You MUST output ONLY tool calls in this format: [TOOL: name("args")]
+        ACT NOW. Output ONLY: [TOOL: name("args")]
         Assistant:
         """
         
@@ -129,21 +129,16 @@ final class ChatController: @unchecked Sendable {
         let worker = await pool.getWorker(for: workerIndex)
         
         do {
-            // Inference
             let generatedText = try await worker.respond(to: prompt)
-            
-            // Sample busy count WHILE inference was running would be ideal, 
-            // but we sample it right after to see the tail.
-            let activeCount = await pool.busyWorkerCount()
-            let finalBusy = max(activeCount, 1)
-            
+            let busyCount = await pool.busyWorkerCount()
+            let finalBusy = max(busyCount, 1)
             let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            // --- ROBUST TOOL CALL PARSING ---
+            // --- PRECISION TOOL CALL PARSING ---
             var toolCalls: [OpenAIToolCall] = []
             
-            // Matches [TOOL: name("args")] or name("args")
-            let pattern = "(?:\\[TOOL:\\s*)?([a-zA-Z0-9_]+)\\s*\\((.*)\\)(?:\\])?"
+            // Non-greedy pattern to avoid consuming multiple tool blocks
+            let pattern = "\\[TOOL:\\s*([a-zA-Z0-9_]+)\\s*\\((.*?)\\)\\]"
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
                 let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
                 let matches = regex.matches(in: trimmed, options: [], range: nsRange)
@@ -151,16 +146,16 @@ final class ChatController: @unchecked Sendable {
                 for match in matches {
                     if let nameRange = Range(match.range(at: 1), in: trimmed),
                        let argsRange = Range(match.range(at: 2), in: trimmed) {
+                        
                         let name = String(trimmed[nameRange]).trimmingCharacters(in: .whitespaces)
                         var argsRaw = String(trimmed[argsRange]).trimmingCharacters(in: .whitespaces)
                         
                         var finalArgsStr = "{}"
                         
-                        // If it's already JSON, use it.
-                        if argsRaw.hasPrefix("{") {
+                        if argsRaw.hasPrefix("{") && argsRaw.hasSuffix("}") {
                             finalArgsStr = argsRaw
                         } else {
-                            // SAFE RECOVERY: Properly escape the string for JSON
+                            // SMART RECOVERY: Escape quotes and wrap in JSON
                             let cleanVal = argsRaw.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
                             var dict: [String: String] = [:]
                             if name == "mariadb_query" || name == "mariadb_export" {
