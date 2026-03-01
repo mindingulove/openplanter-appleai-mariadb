@@ -12,15 +12,16 @@ actor ModelWorker {
         self.session = LanguageModelSession(model: .default)
     }
     
-    func respond(to prompt: String) async throws -> String {
-        print("Worker [\(id)]: Prompt: \(prompt.count) chars")
+    func respond(to messages: [LanguageModelSession.Message], tools: [ChatTool]? = nil) async throws -> LanguageModelSession.Response {
+        print("Worker [\(id)]: Messages: \(messages.count), Tools: \(tools?.count ?? 0)")
         fflush(stdout)
         
-        let response = try await session.respond(to: prompt)
+        // Pass tools natively to the Foundation Model session
+        let response = try await session.respond(to: messages, tools: tools ?? [])
         
-        print("Worker [\(id)]: Done.")
+        print("Worker [\(id)]: Done. Content: \(response.content.count) chars")
         fflush(stdout)
-        return response.content
+        return response
     }
 }
 
@@ -67,98 +68,74 @@ final class ChatController: @unchecked Sendable {
     func createChatCompletion(req: Request) async throws -> Response {
         let chatReq = try req.content.decode(OpenAIChatRequest.self)
         
-        // --- ULTRA-SAFE PROMPT RECONSTRUCTION ---
-        // 4091 tokens is the hard limit. 
-        // We target ~1000 tokens (approx 4000 chars) to be absolutely safe.
-        
-        var systemPart = ""
-        var goalPart = ""
-        var observationPart = ""
-        
-        // 1. Identify critical components
-        if let sys = chatReq.messages.first(where: { $0.role == "system" }) {
-            systemPart = String((sys.content ?? "").prefix(1000))
+        // Translate OpenAI messages to Apple Foundation Model messages
+        let messages: [LanguageModelSession.Message] = chatReq.messages.compactMap { msg in
+            let role: LanguageModelSession.Message.Role
+            switch msg.role {
+            case "system": role = .system
+            case "user": role = .user
+            case "assistant": role = .assistant
+            case "tool": role = .tool
+            default: return nil
+            }
+            return LanguageModelSession.Message(role: role, content: msg.content ?? "")
         }
         
-        if let firstUser = chatReq.messages.first(where: { $0.role == "user" }) {
-            goalPart = String((firstUser.content ?? "").prefix(800))
+        // Translate OpenAI tools to Apple Foundation Model tools
+        let chatTools: [ChatTool]? = chatReq.tools?.compactMap { tool in
+            guard tool.type == "function" else { return nil }
+            return ChatTool(
+                name: tool.function.name,
+                description: tool.function.description ?? "",
+                parameters: tool.function.parameters // Simplified mapping
+            )
         }
-        
-        // 3. Current Observation (the most recent tool result)
-        if let last = chatReq.messages.last, last.role != "user" {
-            observationPart = String((last.content ?? "").prefix(2000))
-        }
-        
-        let prompt = """
-        Instruction: \(systemPart)
-        
-        Goal: \(goalPart)
-        
-        Current Data:
-        \(observationPart)
-        
-        Task: If the 'Current Data' answers the 'Goal', provide the final answer. 
-        Otherwise, use `mariadb_query` to explore further. Do NOT repeat queries.
-        Assistant:
-        """
         
         let worker = pool.getWorker(for: nextIndex())
         
         do {
-            let generatedText = try await worker.respond(to: prompt)
-            let finalOutput = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let modelResponse = try await worker.respond(to: messages, tools: chatTools)
             
-            // Repair tool calls
-            var toolCalls: [[String: Any]]? = nil
-            if finalOutput.contains("mariadb_query") || finalOutput.contains("SELECT") || finalOutput.contains("SHOW TABLES") {
-                var dbQuery = "SHOW TABLES;"
-                if let range = finalOutput.range(of: "SELECT", options: .caseInsensitive) {
-                    let part = String(finalOutput[range.lowerBound...])
-                    dbQuery = part.components(separatedBy: "\n")[0].components(separatedBy: ";")[0] + ";"
-                } else if let range = finalOutput.range(of: "DESCRIBE", options: .caseInsensitive) {
-                    let part = String(finalOutput[range.lowerBound...])
-                    dbQuery = part.components(separatedBy: "\n")[0].components(separatedBy: ";")[0] + ";"
+            // Map native tool calls back to OpenAI format
+            var openAIToolCalls: [OpenAIToolCall]? = nil
+            if let nativeCalls = modelResponse.toolCalls {
+                openAIToolCalls = nativeCalls.map { call in
+                    OpenAIToolCall(
+                        id: "call_" + UUID().uuidString.prefix(8),
+                        type: "function",
+                        function: OpenAIToolCallFunction(
+                            name: call.name,
+                            arguments: call.argumentsJSON
+                        )
+                    )
                 }
-                
-                toolCalls = [[
-                    "id": "call_\(UUID().uuidString.prefix(8))",
-                    "type": "function",
-                    "function": ["name": "mariadb_query", "arguments": "{\"query\": \"\(dbQuery)\"}"]
-                ]]
             }
             
             let responseObj: [String: Any] = [
                 "id": "chatcmpl-\(UUID().uuidString)",
-                "object": chatReq.stream == true ? "chat.completion.chunk" : "chat.completion",
+                "object": "chat.completion",
                 "created": Int(Date().timeIntervalSince1970),
                 "model": chatReq.model,
                 "choices": [[
                     "index": 0,
-                    (chatReq.stream == true ? "delta" : "message"): [
+                    "message": [
                         "role": "assistant",
-                        "content": toolCalls == nil ? finalOutput : nil,
-                        "tool_calls": toolCalls
+                        "content": modelResponse.content,
+                        "tool_calls": openAIToolCalls != nil ? try JSONSerialization.jsonObject(with: JSONEncoder().encode(openAIToolCalls)) : nil
                     ],
-                    "finish_reason": toolCalls == nil ? "stop" : "tool_calls"
+                    "finish_reason": openAIToolCalls != nil ? "tool_calls" : "stop"
                 ]],
                 "usage": [
-                    "prompt_tokens": prompt.count / 4,
-                    "completion_tokens": finalOutput.count / 4,
-                    "total_tokens": (prompt.count + finalOutput.count) / 4
+                    "prompt_tokens": 0, // Simplified for now
+                    "completion_tokens": modelResponse.content.count / 4,
+                    "total_tokens": modelResponse.content.count / 4
                 ]
             ]
             
-            if chatReq.stream == true {
-                let sseData = "data: \(try String(data: JSONSerialization.data(withJSONObject: responseObj), encoding: .utf8)!)\n\ndata: [DONE]\n\n"
-                let res = try await sseData.encodeResponse(for: req)
-                res.headers.replaceOrAdd(name: .contentType, value: "text/event-stream")
-                return res
-            } else {
-                let data = try JSONSerialization.data(withJSONObject: responseObj)
-                let res = Response(status: .ok, body: .init(data: data))
-                res.headers.replaceOrAdd(name: .contentType, value: "application/json")
-                return res
-            }
+            let data = try JSONSerialization.data(withJSONObject: responseObj)
+            let res = Response(status: .ok, body: .init(data: data))
+            res.headers.replaceOrAdd(name: .contentType, value: "application/json")
+            return res
             
         } catch {
             print("ChatController: ERROR - \(error)")
@@ -172,8 +149,10 @@ final class ChatController: @unchecked Sendable {
             let text: String
         }
         let summarizeReq = try req.content.decode(SummarizeRequest.self)
-        let prompt = "Squeeze this data into one core fact sentence (max 150 chars): \(summarizeReq.text.prefix(2000))\nFact:"
+        let messages = [LanguageModelSession.Message(role: .user, content: "Squeeze this data into one core fact sentence (max 150 chars): \(summarizeReq.text.prefix(2000))\nFact:")]
         let worker = pool.getWorker(for: nextIndex())
-        return try await worker.respond(to: prompt)
+        let response = try await worker.respond(to: messages)
+        return response.content
     }
 }
+
