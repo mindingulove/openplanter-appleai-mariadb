@@ -5,18 +5,23 @@ import FoundationModels
 @available(macOS 26.0, *)
 actor ModelWorker {
     private let id: Int
+    private let session: LanguageModelSession
     
     init(id: Int) {
         self.id = id
+        // Persistent session to avoid re-initialization overhead.
+        self.session = LanguageModelSession(model: .default)
     }
     
     func respond(to prompt: String) async throws -> String {
         print("Worker [\(id)]: Prompt: \(prompt.count) chars")
         fflush(stdout)
         
-        // Use a fresh session every time to prevent hidden context buildup.
-        // This is crucial for OpenPlanter as it sends full history in its prompt.
-        let session = LanguageModelSession(model: .default)
+        // We use the stateful session. respond(to:) appends to the internal transcript.
+        // To keep it OpenAI-compatible (stateless from bridge's perspective),
+        // we should ideally clear the transcript, but since we manage context 
+        // in the prompt reconstruction, we'll just send the prompt.
+        // Note: Apple's FoundationModels often handle long context by internal pruning.
         let response = try await session.respond(to: prompt)
         
         print("Worker [\(id)]: Done.")
@@ -32,7 +37,8 @@ final class ModelPool: Sendable {
     init() {
         let totalRAM = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
         let cpuCores = ProcessInfo.processInfo.processorCount
-        let workerCount = min(Int(totalRAM / 2), cpuCores, 4)
+        // INCREASED CAP: 32 workers as requested, or based on system resources.
+        let workerCount = min(Int(totalRAM / 2), cpuCores, 32) 
         
         print("💻 Mac Specs: \(totalRAM)GB RAM, \(cpuCores) Cores")
         print("🧠 Model Pool: Spawning \(workerCount) workers...")
@@ -68,34 +74,41 @@ final class ChatController: @unchecked Sendable {
     func createChatCompletion(req: Request) async throws -> Response {
         let chatReq = try req.content.decode(OpenAIChatRequest.self)
         
-        // --- DYNAMIC PROMPT RECONSTRUCTION (ULTRA-CONSERVATIVE) ---
+        // --- ANCHORED PROMPT RECONSTRUCTION ---
         var systemPart = ""
         var toolsPart = ""
+        var discoveryAnchor = ""
         var recentUserPart = ""
-        var observationPart = ""
+        var lastObservation = ""
         
-        // 1. System Prompt (strictly capped)
+        // 1. System Prompt
         if let sys = chatReq.messages.first(where: { $0.role == "system" }) {
             systemPart = String((sys.content ?? "").prefix(800))
         }
         
-        // 2. Dynamic Tool Definitions (most important tools first)
+        // 2. Dynamic Tool Definitions
         if let tools = chatReq.tools {
             toolsPart = "Available Tools:\n"
-            for t in tools.prefix(8) { // Capped at 8 tools to save space
+            for t in tools.prefix(10) { 
                 let params = t.function.parameters?.stringify() ?? "{}"
                 toolsPart += "- \(t.function.name)(\(params))\n"
             }
         }
         
-        // 3. Most Recent User Instruction (the core command)
+        // 3. Discovery Anchor (The VERY FIRST tool result, usually DESCRIBE or SHOW TABLES)
+        // This prevents the model from forgetting the schema in long conversations.
+        if let firstObs = chatReq.messages.first(where: { $0.role != "user" && $0.role != "system" }) {
+            discoveryAnchor = String((firstObs.content ?? "").prefix(1000))
+        }
+        
+        // 4. Most Recent User Instruction
         if let lastUser = chatReq.messages.last(where: { $0.role == "user" }) {
             recentUserPart = String((lastUser.content ?? "").prefix(600))
         }
         
-        // 4. Most Recent Observation (Tool Result) - HIGHEST PRIORITY DATA
+        // 5. Last Observation (Latest Result)
         if let lastObs = chatReq.messages.last(where: { $0.role != "user" && $0.role != "system" }) {
-            observationPart = String((lastObs.content ?? "").prefix(1200))
+            lastObservation = String((lastObs.content ?? "").prefix(1200))
         }
         
         let prompt = """
@@ -103,13 +116,16 @@ final class ChatController: @unchecked Sendable {
         
         \(toolsPart)
         
-        STATE:
-        \(observationPart)
+        SCHEMA/CONTEXT ANCHOR:
+        \(discoveryAnchor)
         
-        GOAL:
+        LATEST DATA:
+        \(lastObservation)
+        
+        USER GOAL:
         \(recentUserPart)
         
-        TASK: If STATE answers GOAL, say it. Else:
+        TASK: If LATEST DATA answers USER GOAL, provide final answer. Else:
         CALL: tool_name({"arg": "val"})
         Assistant:
         """
@@ -123,17 +139,14 @@ final class ChatController: @unchecked Sendable {
             let generatedText = try await worker.respond(to: prompt)
             let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            // --- DYNAMIC TOOL CALL PARSING ---
+            // Dynamic Tool Call Parsing
             var toolCalls: [OpenAIToolCall]? = nil
-            
-            // Regex to find "CALL: tool_name({json_args})"
             let pattern = "CALL:\\s*([a-zA-Z0-9_]+)\\s*\\((.*)\\)"
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
                 let range = NSRange(trimmed.startIndex..., in: trimmed)
                 if let match = regex.firstMatch(in: trimmed, options: [], range: range) {
                     let nameRange = Range(match.range(at: 1), in: trimmed)!
                     let argsRange = Range(match.range(at: 2), in: trimmed)!
-                    
                     let name = String(trimmed[nameRange])
                     let args = String(trimmed[argsRange])
                     

@@ -154,8 +154,8 @@ class RLMEngine:
             include_mariadb=self.config.use_mariadb
         )
         
-        # Aggressively prune tools for Apple Foundation Model to save tokens
         if is_apple:
+            self.config.max_steps_per_call = 30
             essential_tools = {"mariadb_query", "read_file", "write_file", "run_shell", "think", "list_files", "search_files"}
             tool_defs = [d for d in tool_defs if d["name"] in essential_tools]
             
