@@ -13,14 +13,19 @@ actor ModelWorker {
     }
     
     func respond(to prompt: String) async throws -> String {
-        print("Worker [\(id)]: Thinking...")
+        print("Worker [\(id)]: Thinking (High Priority)...")
         fflush(stdout)
         
-        let response = try await session.respond(to: prompt)
+        // We only extract the 'content' string inside the detached task
+        // because the full 'Response' object is not Sendable.
+        let generatedContent = try await Task.detached(priority: .userInitiated) {
+            let response = try await self.session.respond(to: prompt)
+            return response.content
+        }.value
         
         print("Worker [\(id)]: Done.")
         fflush(stdout)
-        return response.content
+        return generatedContent
     }
 }
 
@@ -33,7 +38,7 @@ actor ModelPool {
         if let envWorkers = ProcessInfo.processInfo.environment["APPLE_BRIDGE_WORKERS"], let count = Int(envWorkers) {
             self.maxWorkers = count
         } else {
-            self.maxWorkers = 120 // Increased cap to 120
+            self.maxWorkers = 120
         }
         
         print("🧠 Model Pool: Dynamic mode enabled (Cap: \(maxWorkers) workers)")
@@ -85,7 +90,7 @@ final class ChatController: @unchecked Sendable {
     func createChatCompletion(req: Request) async throws -> Response {
         let chatReq = try req.content.decode(OpenAIChatRequest.self)
         
-        // --- ANCHORED PROMPT RECONSTRUCTION ---
+        // --- ANCHORED PROMPT RECONSTRUCTION (ULTRA-CONSERVATIVE) ---
         var systemPart = ""
         var toolsPart = ""
         var discoveryAnchor = ""
@@ -104,7 +109,6 @@ final class ChatController: @unchecked Sendable {
             }
         }
         
-        // SMART ANCHOR: Find the first successful schema query (SHOW/DESCRIBE)
         for msg in chatReq.messages {
             if msg.role != "user" && msg.role != "system" {
                 let content = msg.content ?? ""
@@ -128,17 +132,17 @@ final class ChatController: @unchecked Sendable {
         
         \(toolsPart)
         
-        DATABASE SCHEMA (ANCHOR):
+        SCHEMA ANCHOR:
         \(discoveryAnchor)
         
-        LAST TOOL RESULT:
+        LATEST DATA:
         \(lastObservation)
         
-        GOAL:
+        USER GOAL:
         \(recentUserPart)
         
-        CRITICAL: If LAST TOOL RESULT failed or was empty, try a different SQL query.
-        To use a tool, output: CALL: tool_name({"arg": "val"})
+        TASK: If LATEST DATA answers USER GOAL, provide final answer. Else:
+        CALL: tool_name({"arg": "val"})
         Assistant:
         """
         
@@ -202,6 +206,7 @@ final class ChatController: @unchecked Sendable {
                 )
             )
             
+            // DYNAMICALLY INJECT WORKER COUNT
             var rawRes = try JSONEncoder().encode(responseObj)
             if var json = try JSONSerialization.jsonObject(with: rawRes) as? [String: Any],
                var usage = json["usage"] as? [String: Any] {

@@ -41,6 +41,34 @@ class WorkspaceTools:
     max_shell_output_chars: int = 16000
     shell: str = "/bin/sh"
     apple_mode: bool = False
+    _db_conn: Any = field(init=False, default=None)
+    _db_params: dict[str, Any] = field(init=False, default_factory=dict)
+
+    def _get_db_conn(self, database: str | None = None) -> Any:
+        import pymysql
+        db_name = database or self.mariadb_database
+        params = {
+            "host": self.mariadb_host,
+            "port": self.mariadb_port,
+            "user": self.mariadb_user,
+            "password": self.mariadb_password,
+            "database": db_name,
+        }
+        if self._db_conn and self._db_params == params:
+            try:
+                self._db_conn.ping(reconnect=True)
+                return self._db_conn
+            except Exception:
+                pass
+        
+        conn = pymysql.connect(
+            **params,
+            cursorclass=pymysql.cursors.DictCursor,
+            connect_timeout=10
+        )
+        self._db_conn = conn
+        self._db_params = params
+        return conn
 
     _bg_jobs: dict[int, tuple[subprocess.Popen, Any, Path]] = field(init=False)
     _bg_next_id: int = field(init=False)
@@ -123,21 +151,7 @@ class WorkspaceTools:
     def mariadb_query(self, query: str, database: str | None = None) -> str:
         """Execute a SQL query against MariaDB and return formatted results."""
         try:
-            import pymysql
-        except ImportError:
-            return "Error: 'pymysql' library not installed."
-
-        db_name = database or self.mariadb_database
-        try:
-            connection = pymysql.connect(
-                host=self.mariadb_host,
-                port=self.mariadb_port,
-                user=self.mariadb_user,
-                password=self.mariadb_password,
-                database=db_name,
-                cursorclass=pymysql.cursors.DictCursor,
-                connect_timeout=10
-            )
+            connection = self._get_db_conn(database)
             try:
                 with connection.cursor() as cursor:
                     cursor.execute(query)
@@ -178,10 +192,10 @@ class WorkspaceTools:
                     else:
                         connection.commit()
                         return f"Query executed successfully. Rows affected: {cursor.rowcount}"
-            finally:
-                connection.close()
+            except Exception as e:
+                return f"Query failed: {e}"
         except Exception as exc:
-            return f"MariaDB Error: {exc}"
+            return f"MariaDB Connection Error: {exc}"
 
     def mariadb_export(self, query: str, database: str | None = None) -> str:
         """Execute a query and save the ENTIRE result to a temporary data artifact.

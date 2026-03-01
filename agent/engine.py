@@ -131,6 +131,7 @@ class RLMEngine:
     model_factory: ModelFactory | None = None
     _model_cache: dict[tuple[str, str | None], BaseModel] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    _pool: ThreadPoolExecutor = field(default_factory=lambda: ThreadPoolExecutor(max_workers=128))
     session_dir: Path | None = None
     session_id: str | None = None
     _shell_command_counts: dict[tuple[int, str], int] = field(default_factory=dict)
@@ -508,24 +509,23 @@ class RLMEngine:
                 if callable(begin_group):
                     begin_group(group_id)
                 try:
-                    with ThreadPoolExecutor(max_workers=len(parallel)) as pool:
-                        futures = {
-                            pool.submit(
-                                self._run_one_tool,
-                                tc=tc, depth=depth, step=step, objective=objective,
-                                context=context, on_event=on_event, on_step=on_step,
-                                deadline=deadline, current_model=model,
-                                replay_logger=replay_logger,
-                                parallel_group_id=group_id,
-                                parallel_owner=f"{tc.id or 'tc'}:{idx}",
-                                worker_id=turn.worker_id,
-                            ): idx
-                            for idx, tc in parallel
-                        }
-                        for future in futures:
-                            idx = futures[future]
-                            result_entry, is_final_entry = future.result()
-                            indexed_results[idx] = (result_entry, is_final_entry)
+                    futures = {
+                        self._pool.submit(
+                            self._run_one_tool,
+                            tc=tc, depth=depth, step=step, objective=objective,
+                            context=context, on_event=on_event, on_step=on_step,
+                            deadline=deadline, current_model=model,
+                            replay_logger=replay_logger,
+                            parallel_group_id=group_id,
+                            parallel_owner=f"{tc.id or 'tc'}:{idx}",
+                            worker_id=turn.worker_id,
+                        ): idx
+                        for idx, tc in parallel
+                    }
+                    for future in futures:
+                        idx = futures[future]
+                        result_entry, is_final_entry = future.result()
+                        indexed_results[idx] = (result_entry, is_final_entry)
                 finally:
                     if callable(end_group):
                         end_group(group_id)
