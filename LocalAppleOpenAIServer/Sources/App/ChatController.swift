@@ -33,7 +33,7 @@ actor ModelPool {
         if let envWorkers = ProcessInfo.processInfo.environment["APPLE_BRIDGE_WORKERS"], let count = Int(envWorkers) {
             self.maxWorkers = count
         } else {
-            self.maxWorkers = 45 // Increased cap to 45
+            self.maxWorkers = 45
         }
         
         print("🧠 Model Pool: Dynamic mode enabled (Cap: \(maxWorkers) workers)")
@@ -81,7 +81,7 @@ final class ChatController: @unchecked Sendable {
     func createChatCompletion(req: Request) async throws -> Response {
         let chatReq = try req.content.decode(OpenAIChatRequest.self)
         
-        // --- ANCHORED PROMPT RECONSTRUCTION ---
+        // --- ANCHORED PROMPT RECONSTRUCTION (ULTRA-CONSERVATIVE) ---
         var systemPart = ""
         var toolsPart = ""
         var discoveryAnchor = ""
@@ -122,7 +122,7 @@ final class ChatController: @unchecked Sendable {
         
         \(toolsPart)
         
-        SCHEMA/CONTEXT ANCHOR:
+        SCHEMA ANCHOR:
         \(discoveryAnchor)
         
         LATEST DATA:
@@ -145,22 +145,36 @@ final class ChatController: @unchecked Sendable {
             let generatedText = try await worker.respond(to: prompt)
             let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            // Dynamic Tool Call Parsing
+            // --- ROBUST DYNAMIC TOOL CALL PARSING ---
             var toolCalls: [OpenAIToolCall]? = nil
-            let pattern = "CALL:\\s*([a-zA-Z0-9_]+)\\s*\\((.*)\\)"
+            let pattern = "(?:CALL:\\s*)?([a-zA-Z0-9_]+)\\s*\\((.*)\\)"
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
                 let range = NSRange(trimmed.startIndex..., in: trimmed)
-                if let match = regex.firstMatch(in: trimmed, options: [], range: range) {
-                    let nameRange = Range(match.range(at: 1), in: trimmed)!
-                    let argsRange = Range(match.range(at: 2), in: trimmed)!
-                    let name = String(trimmed[nameRange])
-                    let args = String(trimmed[argsRange])
-                    
-                    toolCalls = [OpenAIToolCall(
-                        id: "call_" + UUID().uuidString.prefix(8),
-                        type: "function",
-                        function: OpenAIToolCallFunction(name: name, arguments: args)
-                    )]
+                let matches = regex.matches(in: trimmed, options: [], range: range)
+                
+                for match in matches {
+                    if let nameRange = Range(match.range(at: 1), in: trimmed),
+                       let argsRange = Range(match.range(at: 2), in: trimmed) {
+                        let name = String(trimmed[nameRange]).trimmingCharacters(in: .whitespaces)
+                        var args = String(trimmed[argsRange]).trimmingCharacters(in: .whitespaces)
+                        
+                        if args.hasPrefix("\"") && args.hasSuffix("\"") && !args.contains(":") {
+                            if name == "mariadb_query" || name == "mariadb_export" {
+                                args = "{\"query\": \(args)}"
+                            } else if name == "read_file" || name == "list_files" {
+                                args = "{\"path\": \(args)}"
+                            } else if name == "think" {
+                                args = "{\"note\": \(args)}"
+                            }
+                        }
+                        
+                        if toolCalls == nil { toolCalls = [] }
+                        toolCalls?.append(OpenAIToolCall(
+                            id: "call_" + UUID().uuidString.prefix(8),
+                            type: "function",
+                            function: OpenAIToolCallFunction(name: name, arguments: args)
+                        ))
+                    }
                 }
             }
             
