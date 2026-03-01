@@ -238,6 +238,10 @@ def _http_stream_sse(
         _extend_socket_timeout(resp, stream_timeout)
         try:
             return _read_sse_events(resp, on_sse_event=on_sse_event)
+        except (TimeoutError, socket.timeout, urllib.error.URLError, OSError) as exc:
+            # Mid-stream timeout / socket error — retry the full request.
+            last_exc = exc
+            continue
         finally:
             resp.close()
 
@@ -582,6 +586,7 @@ class OpenAICompatibleModel:
     strict_tools: bool = True
     tool_defs: list[dict[str, Any]] | None = None
     on_content_delta: Callable[[str, str], None] | None = None
+    max_tokens: int | None = None
 
     def _is_reasoning_model(self) -> bool:
         """OpenAI reasoning models (o-series, gpt-5 series) have different API constraints."""
@@ -615,6 +620,9 @@ class OpenAICompatibleModel:
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+
+        if self.max_tokens is not None:
+            payload["max_tokens"] = self.max_tokens
 
         if conversation.stop_sequences:
             payload["stop"] = conversation.stop_sequences

@@ -33,9 +33,23 @@ _APPLE_RE = re.compile(r"^apple", re.IGNORECASE)
 
 def infer_provider_for_model(model: str) -> str | None:
     """Return the likely provider for *model*, or ``None`` if ambiguous."""
-    if model.lower().startswith("apple/"):
+    lower = model.lower()
+    if lower.startswith("apple/"):
         return "apple"
     if "/" in model:
+        if any(
+            lower.startswith(prefix)
+            for prefix in (
+                "qwen/",
+                "meta-llama/",
+                "mistralai/",
+                "mlx-community/",
+                "deepseek-ai/",
+                "google/",
+                "microsoft/",
+            )
+        ):
+            return "mlx"
         return "openrouter"
     if _ANTHROPIC_RE.search(model):
         return "anthropic"
@@ -47,10 +61,9 @@ def infer_provider_for_model(model: str) -> str | None:
         return "openai"
     return None
 
-
 def _validate_model_provider(model_name: str, provider: str) -> None:
     """Raise ``ModelError`` if *model_name* is clearly wrong for *provider*."""
-    if provider == "openrouter":
+    if provider in ("openrouter", "mlx"):
         return
     inferred = infer_provider_for_model(model_name)
     if inferred is None or inferred == provider or inferred == "openrouter":
@@ -60,7 +73,6 @@ def _validate_model_provider(model_name: str, provider: str) -> None:
         f"not '{provider}'. Use --provider {inferred} or pick a "
         f"model that matches the current provider."
     )
-
 
 def _fetch_models_for_provider(cfg: AgentConfig, provider: str) -> list[dict]:
     if provider == "openai":
@@ -81,8 +93,9 @@ def _fetch_models_for_provider(cfg: AgentConfig, provider: str) -> list[dict]:
         return list_openai_models(api_key=cfg.cerebras_api_key, base_url=cfg.cerebras_base_url)
     if provider == "apple":
         return [{"id": "apple-foundation-model"}]
+    if provider == "mlx":
+        return [{"id": "Qwen/Qwen2.5-Coder-7B-Instruct"}]
     raise ModelError(f"Unknown provider: {provider}")
-
 
 def _resolve_model_name(cfg: AgentConfig) -> str:
     selected = (cfg.model or "").strip()
@@ -98,10 +111,9 @@ def _resolve_model_name(cfg: AgentConfig) -> str:
         return str(models[0]["id"])
     return PROVIDER_DEFAULT_MODELS.get(cfg.provider, "claude-opus-4-6")
 
-
 def build_model_factory(cfg: AgentConfig) -> ModelFactory | None:
     """Return a factory that creates models by name + optional reasoning effort."""
-    def _factory(model_name: str, reasoning_effort: str | None = None) -> AnthropicModel | OpenAICompatibleModel:
+    def _factory(model_name: str, reasoning_effort: str | None = None) -> AnthropicModel | OpenAICompatibleModel | AppleModel:
         provider = infer_provider_for_model(model_name)
         effort = reasoning_effort or cfg.reasoning_effort
         if provider == "anthropic" and cfg.anthropic_api_key:
@@ -109,6 +121,14 @@ def build_model_factory(cfg: AgentConfig) -> ModelFactory | None:
                 model=model_name,
                 api_key=cfg.anthropic_api_key,
                 base_url=cfg.anthropic_base_url,
+                reasoning_effort=effort,
+                timeout_sec=cfg.model_timeout_sec,
+            )
+        if provider == "mlx":
+            return OpenAICompatibleModel(
+                model=model_name,
+                api_key=cfg.mlx_api_key or "mlx",
+                base_url=cfg.mlx_base_url,
                 reasoning_effort=effort,
                 timeout_sec=cfg.model_timeout_sec,
             )
@@ -216,6 +236,17 @@ def build_engine(cfg: AgentConfig) -> RLMEngine:
             base_url=cfg.apple_base_url,
             reasoning_effort=cfg.reasoning_effort,
             timeout_sec=cfg.model_timeout_sec,
+        )
+    elif cfg.provider == "mlx":
+        cfg.discover_mlx_server()
+        model = OpenAICompatibleModel(
+            model=model_name,
+            api_key=cfg.mlx_api_key or "mlx",
+            base_url=cfg.mlx_base_url,
+            reasoning_effort=cfg.reasoning_effort,
+            timeout_sec=cfg.model_timeout_sec,
+            max_tokens=2048,
+            strict_tools=False,
         )
     elif cfg.provider == "anthropic" and cfg.anthropic_api_key:
         model = AnthropicModel(

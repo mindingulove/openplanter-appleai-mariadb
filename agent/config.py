@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,7 @@ PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "openrouter": "anthropic/claude-sonnet-4-5",
     "cerebras": "qwen-3-235b-a22b-instruct-2507",
     "apple": "apple-foundation-model",
+    "mlx": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
 }
 
 
@@ -28,12 +30,14 @@ class AgentConfig:
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     cerebras_base_url: str = "https://api.cerebras.ai/v1"
     apple_base_url: str = "http://127.0.0.1:8080/v1"
+    mlx_base_url: str = "http://127.0.0.1:8080/v1"
     exa_base_url: str = "https://api.exa.ai"
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     openrouter_api_key: str | None = None
     cerebras_api_key: str | None = None
     apple_api_key: str | None = "local-apple"
+    mlx_api_key: str | None = "mlx"
     exa_api_key: str | None = None
     voyage_api_key: str | None = None
     max_depth: int = 4
@@ -59,6 +63,7 @@ class AgentConfig:
     mariadb_password: str = ""
     mariadb_database: str | None = None
     apple_discovered: bool = False
+    mlx_discovered: bool = False
     use_mariadb: bool = False
     model_timeout_sec: int = 120
 
@@ -147,6 +152,114 @@ class AgentConfig:
             self.apple_base_url = self.apple_base_url.replace("{port}", "8080")
             print("⚠️ Discovery failed. Defaulting to 8080.")
 
+    def discover_mlx_server(self) -> None:
+        """Find or start the local MLX server."""
+        if self.provider != "mlx":
+            return
+            
+        import socket
+        def get_free_port():
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('', 0))
+                return s.getsockname()[1]
+                
+        def check_mlx_port(port):
+            import urllib.request
+            try:
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/models")
+                with urllib.request.urlopen(req, timeout=1) as response:
+                    return response.getcode() == 200
+            except:
+                return False
+
+        # First, try to see if ANY mlx server is running by checking process list
+        try:
+            import subprocess
+            ps_out = subprocess.check_output(["ps", "aux"], text=True)
+            for line in ps_out.splitlines():
+                if "mlx_lm.server" in line or ("mlx_lm" in line and "server" in line):
+                    parts = line.split()
+                    pid = parts[1]
+                    try:
+                        lsof_out = subprocess.check_output(["lsof", "-i", "-a", "-p", pid], text=True)
+                        for lline in lsof_out.splitlines():
+                            if "(LISTEN)" in lline:
+                                p = lline.split()[-2].split(":")[-1]
+                                if check_mlx_port(p):
+                                    self.mlx_base_url = f"http://127.0.0.1:{p}/v1"
+                                    self.mlx_discovered = True
+                                    print(f"✅ MLX Server already running on port {p}")
+                                    return
+                    except: pass
+        except: pass
+
+        port = get_free_port()
+        print(f"🛑 Booting MLX Server with {self.model} on port {port}...")
+        print("   (Note: If this is the first time, it will download the model from Hugging Face which may take a few minutes.)")
+        try:
+            import subprocess
+
+            def _find_mlx_python() -> Path:
+                """Return a Python executable that has mlx_lm installed."""
+                candidates = [
+                    Path(sys.executable),
+                    self.workspace / ".venv" / "bin" / "python3",
+                    self.workspace / ".venv312" / "bin" / "python3",
+                ]
+                for candidate in candidates:
+                    if not candidate.exists():
+                        continue
+                    try:
+                        result = subprocess.run(
+                            [str(candidate), "-c", "import mlx_lm"],
+                            capture_output=True, timeout=5,
+                        )
+                        if result.returncode == 0:
+                            return candidate
+                    except Exception:
+                        pass
+                return Path(sys.executable)  # Fallback; will fail at launch time
+
+            mlx_python = _find_mlx_python()
+            decode_concurrency = os.getenv("OPENPLANTER_MLX_DECODE_CONCURRENCY", "2").strip() or "2"
+            prompt_concurrency = os.getenv("OPENPLANTER_MLX_PROMPT_CONCURRENCY", "1").strip() or "1"
+            max_tokens = os.getenv("OPENPLANTER_MLX_MAX_TOKENS", "2048").strip() or "2048"
+            print(
+                "   MLX launch profile: "
+                f"decode={decode_concurrency}, prompt={prompt_concurrency}, max_tokens={max_tokens}, "
+                f"python={mlx_python}"
+            )
+            cmd = [
+                str(mlx_python),
+                "-m",
+                "mlx_lm",
+                "server",
+                "--model",
+                self.model,
+                "--port",
+                str(port),
+                "--decode-concurrency",
+                decode_concurrency,
+                "--prompt-concurrency",
+                prompt_concurrency,
+                "--max-tokens",
+                max_tokens,
+            ]
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            for _ in range(6000): # Allow up to 10 minutes for model download/load
+                time.sleep(0.1)
+                if check_mlx_port(port):
+                    print(f"✅ MLX Server is live on port {port}.")
+                    self.mlx_base_url = f"http://127.0.0.1:{port}/v1"
+                    self.mlx_discovered = True
+                    return
+        except Exception as e:
+            print(f"⚠️ Failed to boot MLX server: {e}")
+
     @classmethod
     def from_env(cls, workspace: str | Path) -> "AgentConfig":
         from dotenv import load_dotenv
@@ -179,6 +292,7 @@ class AgentConfig:
             use_mariadb = bool(mariadb_db)
 
         apple_base_url = os.getenv("OPENPLANTER_APPLE_BASE_URL") or os.getenv("APPLE_BASE_URL", "http://127.0.0.1:8080/v1")
+        mlx_base_url = os.getenv("OPENPLANTER_MLX_BASE_URL") or os.getenv("MLX_BASE_URL", "http://127.0.0.1:8080/v1")
         openai_base_url = os.getenv("OPENPLANTER_OPENAI_BASE_URL") or os.getenv(
             "OPENPLANTER_BASE_URL",
             "https://api.openai.com/v1",
@@ -200,12 +314,14 @@ class AgentConfig:
             openrouter_base_url=os.getenv("OPENPLANTER_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
             cerebras_base_url=os.getenv("OPENPLANTER_CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1"),
             apple_base_url=apple_base_url,
+            mlx_base_url=mlx_base_url,
             exa_base_url=os.getenv("OPENPLANTER_EXA_BASE_URL", "https://api.exa.ai"),
             openai_api_key=openai_api_key,
             anthropic_api_key=os.getenv("OPENPLANTER_ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY"),
             openrouter_api_key=os.getenv("OPENPLANTER_OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY"),
             cerebras_api_key=os.getenv("OPENPLANTER_CEREBRAS_API_KEY") or os.getenv("CEREBRAS_API_KEY"),
             apple_api_key=os.getenv("OPENPLANTER_APPLE_API_KEY") or os.getenv("APPLE_API_KEY", "local-apple"),
+            mlx_api_key=os.getenv("OPENPLANTER_MLX_API_KEY") or os.getenv("MLX_API_KEY", "mlx"),
             exa_api_key=os.getenv("OPENPLANTER_EXA_API_KEY") or os.getenv("EXA_API_KEY"),
             voyage_api_key=os.getenv("OPENPLANTER_VOYAGE_API_KEY") or os.getenv("VOYAGE_API_KEY"),
             max_depth=int(os.getenv("OPENPLANTER_MAX_DEPTH", "4")),
