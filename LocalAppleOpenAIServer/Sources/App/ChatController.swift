@@ -121,8 +121,7 @@ final class ChatController: @unchecked Sendable {
         GOAL:
         \(recentUserPart)
         
-        CRITICAL: To use tools, you MUST use the format: [TOOL: name("args")]
-        Example: [TOOL: mariadb_query("SELECT * FROM table")]
+        ACTION: You MUST output ONLY tool calls in this format: [TOOL: name("args")]
         Assistant:
         """
         
@@ -130,67 +129,63 @@ final class ChatController: @unchecked Sendable {
         let worker = await pool.getWorker(for: workerIndex)
         
         do {
+            // Inference
             let generatedText = try await worker.respond(to: prompt)
+            
+            // Sample busy count WHILE inference was running would be ideal, 
+            // but we sample it right after to see the tail.
+            let activeCount = await pool.busyWorkerCount()
+            let finalBusy = max(activeCount, 1)
+            
             let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            // --- GREEDY MULTI-FORMAT TOOL PARSING ---
+            // --- ROBUST TOOL CALL PARSING ---
             var toolCalls: [OpenAIToolCall] = []
-            let knownTools = ["mariadb_query", "mariadb_export", "read_data_chunk", "summarize_data", "compress_context", "read_file", "write_file", "run_shell", "think", "list_files", "search_files", "subtask", "execute"]
             
-            // Pattern 1: [TOOL: name("args")] - Our preferred rigid format
-            let pattern1 = "\\[TOOL:\\s*([a-zA-Z0-9_]+)\\s*\\((.*)\\)\\]"
-            
-            // Pattern 2: name("args") or name "args" - Model's natural tendency
-            let pattern2 = "([a-zA-Z0-9_]+)\\s*(?:\\(|\\s+)([^\\n\\)]+)\\)?"
-            
-            let combinedPattern = "(\(pattern1))|(\(pattern2))"
-            
-            if let regex = try? NSRegularExpression(pattern: combinedPattern, options: [.dotMatchesLineSeparators]) {
+            // Matches [TOOL: name("args")] or name("args")
+            let pattern = "(?:\\[TOOL:\\s*)?([a-zA-Z0-9_]+)\\s*\\((.*)\\)(?:\\])?"
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
                 let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
                 let matches = regex.matches(in: trimmed, options: [], range: nsRange)
                 
                 for match in matches {
-                    // Extract name and args based on which pattern matched
-                    var name = ""
-                    var args = ""
-                    
-                    if match.range(at: 2).location != NSNotFound {
-                        // Pattern 1 matched
-                        name = String(trimmed[Range(match.range(at: 2), in: trimmed)!]).trimmingCharacters(in: .whitespaces)
-                        args = String(trimmed[Range(match.range(at: 3), in: trimmed)!]).trimmingCharacters(in: .whitespaces)
-                    } else if match.range(at: 5).location != NSNotFound {
-                        // Pattern 2 matched
-                        name = String(trimmed[Range(match.range(at: 5), in: trimmed)!]).trimmingCharacters(in: .whitespaces)
-                        args = String(trimmed[Range(match.range(at: 6), in: trimmed)!]).trimmingCharacters(in: .whitespaces)
-                    }
-                    
-                    if knownTools.contains(name) {
-                        // Cleanup args: convert simple strings to JSON
-                        if !args.hasPrefix("{") {
-                            let cleanStr = args.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                    if let nameRange = Range(match.range(at: 1), in: trimmed),
+                       let argsRange = Range(match.range(at: 2), in: trimmed) {
+                        let name = String(trimmed[nameRange]).trimmingCharacters(in: .whitespaces)
+                        var argsRaw = String(trimmed[argsRange]).trimmingCharacters(in: .whitespaces)
+                        
+                        var finalArgsStr = "{}"
+                        
+                        // If it's already JSON, use it.
+                        if argsRaw.hasPrefix("{") {
+                            finalArgsStr = argsRaw
+                        } else {
+                            // SAFE RECOVERY: Properly escape the string for JSON
+                            let cleanVal = argsRaw.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                            var dict: [String: String] = [:]
                             if name == "mariadb_query" || name == "mariadb_export" {
-                                args = "{\"query\": \"\(cleanStr)\"}"
-                            } else if name == "read_file" || name == "list_files" || name == "search_files" {
-                                args = "{\"path\": \"\(cleanStr)\", \"query\": \"\(cleanStr)\"}"
+                                dict["query"] = cleanVal
                             } else if name == "think" {
-                                args = "{\"note\": \"\(cleanStr)\"}"
-                            } else if name == "run_shell" {
-                                args = "{\"command\": \"\(cleanStr)\"}"
+                                dict["note"] = cleanVal
+                            } else {
+                                dict["path"] = cleanVal
+                                dict["command"] = cleanVal
+                            }
+                            
+                            if let data = try? JSONSerialization.data(withJSONObject: dict),
+                               let s = String(data: data, encoding: .utf8) {
+                                finalArgsStr = s
                             }
                         }
                         
                         toolCalls.append(OpenAIToolCall(
                             id: "call_" + UUID().uuidString.prefix(8),
                             type: "function",
-                            function: OpenAIToolCallFunction(name: name, arguments: args)
+                            function: OpenAIToolCallFunction(name: name, arguments: finalArgsStr)
                         ))
                     }
                 }
             }
-            
-            // Sample busy count BEFORE finishing
-            let busyCount = await pool.busyWorkerCount()
-            let finalBusy = max(busyCount, 1) // Always at least 1 since we are running
             
             let responseObj = OpenAIChatResponse(
                 id: "chatcmpl-" + UUID().uuidString,
@@ -228,7 +223,7 @@ final class ChatController: @unchecked Sendable {
             
         } catch {
             print("ChatController: ERROR - \(error)")
-            throw Abort(.internalServerError, reason: "Apple Foundation Model error: \(error.localizedDescription)")
+            throw Abort(.internalServerError, reason: "Apple Bridge Error: \(error.localizedDescription)")
         }
     }
 
