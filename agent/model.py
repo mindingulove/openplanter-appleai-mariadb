@@ -783,44 +783,55 @@ class AppleModel(OpenAICompatibleModel):
         # 3. Call parent completion logic
         return super().complete(conversation)
 
-    def condense_conversation(self, conversation: Conversation, keep_recent_turns: int = 4) -> int:
-        """Condense conversation history by summarizing old tool outputs via the local bridge."""
-        messages = conversation.get_messages()
-        # Find tool messages that haven't been condensed yet
-        tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool" and m.get("content") != "[earlier tool output condensed]"]
+    def condense_conversation(self, conversation: Conversation, keep_recent_turns: int = 2) -> int:
+        """Condense conversation history aggressively for the local Apple model.
         
-        if len(tool_indices) <= keep_recent_turns:
+        This version condenses ALL messages (user, assistant, tool) except for the 
+        system prompt and the most recent N turns.
+        """
+        msgs = conversation._provider_messages
+        if len(msgs) <= (keep_recent_turns * 3) + 1: # System + (User+Asst+Tool)*N
             return 0
             
-        to_condense = tool_indices[:-keep_recent_turns]
-        condensed_count = 0
+        # We keep the system prompt (index 0) and the last (keep_recent_turns * 3) messages
+        # Note: Turn structure is usually [User, Assistant (calls), Tool (result)]
+        keep_count = (keep_recent_turns * 3)
+        to_condense_indices = range(1, len(msgs) - keep_count)
         
-        for idx in to_condense:
-            content = messages[idx].get("content")
-            if not content or len(content) < 100: # Don't bother summarizing tiny outputs
-                messages[idx]["content"] = "[earlier tool output condensed]"
-                condensed_count += 1
+        condensed_count = 0
+        placeholder = "[earlier conversation condensed to save context window]"
+        
+        for idx in to_condense_indices:
+            msg = msgs[idx]
+            if not isinstance(msg, dict): continue
+            
+            content = msg.get("content")
+            # Skip if already condensed
+            if content == placeholder or (isinstance(content, str) and content.startswith("[Condensed Summary]")):
                 continue
                 
-            # Perform parallel summarization call
-            try:
-                # Use the summarize endpoint we just added to the bridge
-                summarize_url = self.base_url.replace("/chat/completions", "/summarize").replace("/v1", "/v1/summarize")
-                if "/summarize" not in summarize_url: # Robustness check
-                    summarize_url = self.base_url.rstrip("/") + "/summarize"
-                
-                resp = requests.post(
-                    summarize_url,
-                    json={"text": content},
-                    timeout=self.timeout_sec
-                )
-                if resp.status_code == 200:
-                    summary = resp.text.strip()
-                    messages[idx]["content"] = f"[Condensed Summary]: {summary}"
-                else:
-                    messages[idx]["content"] = "[earlier tool output condensed]"
-            except Exception:
-                messages[idx]["content"] = "[earlier tool output condensed]"
+            # If it's a tool result or has significant content, try to summarize it
+            if isinstance(content, str) and len(content) > 200:
+                try:
+                    # Use the summarize endpoint
+                    summarize_url = self.base_url.replace("/chat/completions", "/summarize").replace("/v1", "/v1/summarize")
+                    if "/summarize" not in summarize_url:
+                        summarize_url = self.base_url.rstrip("/") + "/summarize"
+                    
+                    resp = requests.post(
+                        summarize_url,
+                        json={"text": content},
+                        timeout=self.timeout_sec
+                    )
+                    if resp.status_code == 200:
+                        msg["content"] = f"[Condensed Summary]: {resp.text.strip()}"
+                    else:
+                        msg["content"] = placeholder
+                except Exception:
+                    msg["content"] = placeholder
+            else:
+                # Small messages just get the placeholder
+                msg["content"] = placeholder
             
             condensed_count += 1
             
