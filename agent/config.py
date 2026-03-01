@@ -102,17 +102,25 @@ class AgentConfig:
             except Exception: pass
             return None
 
-        # 3. Clean up any existing instances first to ensure a fresh session
-        print("🛑 Cleaning up Apple Bridge processes...")
+        # 1. Check if a bridge is ALREADY running
+        existing_port = find_bridge_port()
+        if existing_port:
+            if is_template:
+                self.apple_base_url = self.apple_base_url.replace("{port}", existing_port)
+            else:
+                self.apple_base_url = f"http://127.0.0.1:{existing_port}/v1"
+            self.apple_discovered = True
+            return
+
+        # 2. If not running, clean up and start a new one
+        print("🛑 Apple Bridge not found. Cleaning up stale processes...")
         subprocess.run(["pkill", "-9", "apple-bridge"], capture_output=True)
         subprocess.run(["pkill", "-9", "App"], capture_output=True)
         try: Path("/tmp/openplanter_bridge_port").unlink(missing_ok=True)
         except: pass
         
-        # Small delay to let OS release the port
         time.sleep(0.5)
 
-        # 4. Start the bridge
         bridge_bin = self.workspace / "agent" / "appleai" / "apple-bridge"
         if bridge_bin.exists():
             print(f"🛠 Starting local Apple Bridge...")
@@ -121,8 +129,8 @@ class AgentConfig:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True
             )
-            # Wait up to 20 seconds for it to start and bind
-            for i in range(200):
+            # Wait for it to start and bind
+            for _ in range(200):
                 time.sleep(0.1)
                 port = find_bridge_port()
                 if port:
@@ -134,7 +142,7 @@ class AgentConfig:
                     self.apple_discovered = True
                     return
         
-        # Final fallback
+        # Final fallback if discovery failed
         if is_template:
             self.apple_base_url = self.apple_base_url.replace("{port}", "8080")
             print("⚠️ Discovery failed. Defaulting to 8080.")
