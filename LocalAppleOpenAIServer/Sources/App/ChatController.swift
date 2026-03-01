@@ -91,7 +91,6 @@ final class ChatController: @unchecked Sendable {
         \(conversationHistory.suffix(4000))
         --- END HISTORY ---
         
-        REMINDER: Output ONLY: CALL_mariadb_query("SQL")
         Assistant:
         """
         
