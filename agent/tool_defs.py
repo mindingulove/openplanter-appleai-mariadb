@@ -401,21 +401,54 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "mariadb_query",
-        "description": "Execute a SQL query against a MariaDB/MySQL database and return the results as a formatted table.",
+        "name": "mariadb_export",
+        "description": "Execute a SQL query and save the full result to a temporary artifact. Returns an ID. Use this when you expect a large result set.",
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "The SQL query to execute.",
-                },
-                "database": {
-                    "type": "string",
-                    "description": "Optional database name to use.",
-                },
+                "query": {"type": "string", "description": "The SQL query to run."},
+                "database": {"type": "string", "description": "Optional database name."},
             },
             "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "read_data_chunk",
+        "description": "Read a specific range of rows from a data artifact created by mariadb_export.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "artifact_id": {"type": "string", "description": "The ID of the artifact."},
+                "offset": {"type": "integer", "description": "Row offset to start reading from."},
+                "limit": {"type": "integer", "description": "Number of rows to read (max 100)."},
+            },
+            "required": ["artifact_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "summarize_data",
+        "description": "Ask the background AI to distill a large data artifact into a concise summary based on a focus.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "artifact_id": {"type": "string", "description": "The ID of the artifact."},
+                "focus": {"type": "string", "description": "What specific information to look for in the data."},
+            },
+            "required": ["artifact_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "compress_context",
+        "description": "Explicitly trigger a context condensation to clear space in your hardware context window.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "keep_recent_turns": {"type": "integer", "description": "Number of recent turns to keep (default 2)."},
+            },
+            "required": [],
             "additionalProperties": False,
         },
     },

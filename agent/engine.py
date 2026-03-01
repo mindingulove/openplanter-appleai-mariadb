@@ -157,7 +157,8 @@ class RLMEngine:
         if is_apple:
             self.config.max_steps_per_call = 30
             essential_tools = {
-                "mariadb_query", "read_file", "write_file", "run_shell", 
+                "mariadb_query", "mariadb_export", "read_data_chunk", "summarize_data",
+                "compress_context", "read_file", "write_file", "run_shell", 
                 "think", "list_files", "search_files", "subtask", "execute"
             }
             tool_defs = [d for d in tool_defs if d["name"] in essential_tools]
@@ -805,6 +806,48 @@ class RLMEngine:
                 return False, "mariadb_query requires query"
             db_override = args.get("database")
             return False, self.tools.mariadb_query(query, database=str(db_override) if db_override else None)
+
+        if name == "mariadb_export":
+            query = str(args.get("query", "")).strip()
+            if not query:
+                return False, "mariadb_export requires query"
+            db_override = args.get("database")
+            return False, self.tools.mariadb_export(query, database=str(db_override) if db_override else None)
+
+        if name == "read_data_chunk":
+            aid = str(args.get("artifact_id", "")).strip()
+            off = int(args.get("offset", 0))
+            lim = int(args.get("limit", 50))
+            return False, self.tools.read_data_chunk(aid, off, lim)
+
+        if name == "summarize_data":
+            aid = str(args.get("artifact_id", "")).strip()
+            focus = str(args.get("focus", ""))
+            path = self.tools.root / ".openplanter" / "artifacts" / f"{aid}.json"
+            if not path.exists():
+                return False, f"Artifact {aid} not found"
+            
+            content = path.read_text()
+            # Call model summarizer directly
+            summarize_fn = getattr(model, "condense_conversation", None) # Actually we want bridge summarize
+            if hasattr(model, "base_url"):
+                # We reuse the bridge /summarize logic
+                try:
+                    s_url = model.base_url.replace("/chat/completions", "/summarize").replace("/v1", "/v1/summarize")
+                    import requests
+                    resp = requests.post(s_url, json={"text": f"Focus on {focus}: {content[:10000]}"}, timeout=60)
+                    return False, f"Distilled Summary of {aid}:\n{resp.text}"
+                except Exception as e:
+                    return False, f"Summarization failed: {e}"
+            return False, "Summarization tool not supported by current model provider."
+
+        if name == "compress_context":
+            keep = int(args.get("keep_recent_turns", 2))
+            condense_fn = getattr(model, "condense_conversation", None)
+            if condense_fn:
+                count = condense_fn(conversation, keep_recent_turns=keep)
+                return False, f"Context compressed. {count} messages distilled to save space."
+            return False, "Context compression not supported by current model."
 
         if name == "subtask":
             if not self.config.recursive:
