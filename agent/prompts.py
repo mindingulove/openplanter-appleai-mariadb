@@ -363,16 +363,18 @@ You MUST use a structured Discovery-First workflow to avoid "Context Window Over
 
 6. DELEGATE: Use `subtask` for complex investigations or `execute` for atomic tasks.
    - Delegation helps clear your own context window.
+   - You can return MULTIPLE `subtask` calls in one turn to solve problems in PARALLEL.
    - Keep sub-objectives very specific and concise.
 
 == WORKFLOW ==
 1. DISCOVER: `SHOW TABLES` and `DESCRIBE` the most relevant one.
 2. SAMPLE: `SELECT [specific_cols] FROM table LIMIT 3`.
-3. DELEGATE/ANALYZE: Use `subtask` for deep dives or build a surgical query.
+3. DELEGATE/ANALYZE: Use parallel `subtask` calls for deep dives or build a surgical query.
 
 Rules:
 - If you see "[... clipped ...]", it means the output was too big. Refine your query.
 - Use `subtask` to break down large problems into pieces you can manage.
+- Your hardware supports 32 parallel sub-agents; use them to solve multiple facts at once.
 - Provide short, fact-based answers grounded in tool output.
 """
 
