@@ -7,30 +7,26 @@ actor ModelWorker {
     let id: Int
     private(set) var isBusy: Bool = false
     init(id: Int) { self.id = id }
-    
     func respond(to prompt: String) async throws -> String {
         self.isBusy = true
         defer { self.isBusy = false }
         print("Worker [\(id)]: Thinking (High Priority)...")
         fflush(stdout)
-        
-        // Safety truncation
-        let finalPrompt = String(prompt.prefix(10000)) 
-        
-        return try await Task.detached(priority: .userInitiated) {
+        let generatedContent = try await Task.detached(priority: .userInitiated) {
             let session = LanguageModelSession(model: .default)
-            let response = try await session.respond(to: finalPrompt)
+            let response = try await session.respond(to: String(prompt.prefix(10000)))
             return response.content
         }.value
+        print("Worker [\(id)]: Done.")
+        fflush(stdout)
+        return generatedContent
     }
 }
 
 @available(macOS 26.0, *)
 actor ModelPool {
     private var workerDict: [Int: ModelWorker] = [:]
-    init() {
-        for i in 0..<20 { workerDict[i] = ModelWorker(id: i) }
-    }
+    init() { for i in 0..<20 { workerDict[i] = ModelWorker(id: i) } }
     func getWorker(for index: Int) async -> ModelWorker {
         let workerID = index % 120
         if let existing = workerDict[workerID] { return existing }
@@ -46,8 +42,16 @@ actor ModelPool {
 }
 
 @available(macOS 26.0, *)
+actor SchemaCache {
+    private var cache: [String: String] = [:]
+    func update(schema: String) { cache["current"] = schema }
+    func get() -> String { return cache["current"] ?? "" }
+}
+
+@available(macOS 26.0, *)
 final class ChatController: @unchecked Sendable {
     private let pool = ModelPool()
+    private let schemaCache = SchemaCache()
     private var counter: Int = 0
     private let lock = NSLock()
 
@@ -61,19 +65,34 @@ final class ChatController: @unchecked Sendable {
     @Sendable
     func createChatCompletion(req: Request) async throws -> Response {
         let chatReq = try req.content.decode(OpenAIChatRequest.self)
-        
         var systemPart = ""
         var discoveryAnchor = ""
         var recentUserPart = ""
         var lastObservation = ""
         
         if let sys = chatReq.messages.first(where: { $0.role == "system" }) {
-            systemPart = String((sys.content ?? "").prefix(1200)) // INCREASED TO 1200
+            systemPart = String((sys.content ?? "").prefix(800))
         }
+
         for msg in chatReq.messages {
             let content = msg.content ?? ""
-            if content.contains("Field") || content.contains(" | ") { discoveryAnchor = String(content.prefix(1000)) }
+            if content.contains("Field") && content.contains("Type") {
+                let lines = content.components(separatedBy: "\n")
+                var cols: [String] = []
+                for line in lines {
+                    let parts = line.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+                    if parts.count >= 2 && parts[0] != "Field" && !parts[0].contains("-") {
+                        cols.append("\(parts[0]):\(parts[1])")
+                    }
+                }
+                if !cols.isEmpty {
+                    await schemaCache.update(schema: "SCHEMA: (\(cols.joined(separator: ", ")))")
+                }
+            }
         }
+        
+        discoveryAnchor = await schemaCache.get()
+
         if let lastUser = chatReq.messages.last(where: { $0.role == "user" }) {
             recentUserPart = String((lastUser.content ?? "").prefix(600))
         }
@@ -83,19 +102,12 @@ final class ChatController: @unchecked Sendable {
         
         let prompt = """
         \(systemPart)
-        
-        ALLOWED TOOLS: mariadb_query, mariadb_search, mariadb_sample, think, read_file
-        
-        SCHEMA: \(discoveryAnchor)
+        STRUCTURE: \(discoveryAnchor)
         LAST: \(lastObservation)
         GOAL: \(recentUserPart)
-        
-        ACT NOW: Output [TOOL: mariadb_query("SQL")] to investigate.
+        ACT NOW: [TOOL: name("args")]
         Assistant:
         """
-        
-        print("Final Prompt Length: \(prompt.count) chars")
-        fflush(stdout)
         
         let workerIndex = nextIndex()
         let worker = await pool.getWorker(for: workerIndex)
@@ -107,9 +119,6 @@ final class ChatController: @unchecked Sendable {
             let trimmed = generatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             
             var toolCalls: [OpenAIToolCall] = []
-            let knownTools = ["mariadb_query", "mariadb_search", "mariadb_sample", "think", "read_file", "list_files", "search_files", "subtask"]
-            
-            // Matches [TOOL: name("args")] or name("args")
             let pattern = "(?:\\[?TOOL:\\s*)?([a-zA-Z0-9_]+)\\s*\\((.*?)\\)\\]?"
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
                 let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
@@ -118,13 +127,8 @@ final class ChatController: @unchecked Sendable {
                     if let nameRange = Range(match.range(at: 1), in: trimmed),
                        let argsRange = Range(match.range(at: 2), in: trimmed) {
                         let name = String(trimmed[nameRange]).trimmingCharacters(in: .whitespaces)
-                        
-                        // VALIDATE TOOL NAME
-                        if !knownTools.contains(name) { continue }
-                        
                         let argsRaw = String(trimmed[argsRange]).trimmingCharacters(in: .whitespaces)
                         var finalArgs = "{}"
-                        
                         if argsRaw.hasPrefix("{") { finalArgs = argsRaw } 
                         else {
                             let parts = argsRaw.components(separatedBy: ",").map { 
@@ -140,7 +144,6 @@ final class ChatController: @unchecked Sendable {
                             } else if name == "think" {
                                 if parts.count >= 1 { dict["note"] = parts[0] }
                             }
-                            
                             if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
                                 finalArgs = s
                             }
@@ -150,11 +153,9 @@ final class ChatController: @unchecked Sendable {
                 }
             }
             
-            // FALLBACK: If we missed everything but it looks like SQL
             if toolCalls.isEmpty && (trimmed.contains("SELECT") || trimmed.contains("DESCRIBE")) {
                 let sql = trimmed.components(separatedBy: "\n").first(where: { $0.contains("SELECT") || $0.contains("DESCRIBE") }) ?? trimmed
                 let cleanSQL = sql.replacingOccurrences(of: "[TOOL: ", with: "").replacingOccurrences(of: "]", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-                
                 let dict = ["query": cleanSQL]
                 if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
                     toolCalls.append(OpenAIToolCall(id: "call_" + UUID().uuidString.prefix(8), type: "function", function: OpenAIToolCallFunction(name: "mariadb_query", arguments: s)))
@@ -181,7 +182,6 @@ final class ChatController: @unchecked Sendable {
             res.headers.replaceOrAdd(name: .contentType, value: "application/json")
             return res
         } catch {
-            print("ChatController Error: \(error)")
             throw Abort(.internalServerError, reason: "Apple Bridge Error: \(error.localizedDescription)")
         }
     }
@@ -190,7 +190,7 @@ final class ChatController: @unchecked Sendable {
     func summarize(req: Request) async throws -> String {
         struct SummarizeRequest: Content { let text: String }
         let summarizeReq = try req.content.decode(SummarizeRequest.self)
-        let prompt = "Summarize concisely: \(summarizeReq.text.prefix(2500))\nSummary:"
+        let prompt = "Summarize: \(summarizeReq.text.prefix(2000))"
         let worker = await pool.getWorker(for: nextIndex())
         return try await worker.respond(to: prompt)
     }
