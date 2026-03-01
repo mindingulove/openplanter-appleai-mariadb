@@ -140,9 +140,6 @@ final class ChatController: @unchecked Sendable {
                                         if lsql.contains("select") && !lsql.contains("from") {
                                             argsRaw += " FROM vw_aps_faixa_etaria"
                                         }
-                                        if lsql.contains("select id_aps") && !lsql.contains("sum") && !lsql.contains("count") {
-                                            argsRaw = "SELECT id_aps, SUM(quantidade) as total FROM vw_aps_faixa_etaria WHERE faixa_etaria LIKE '%04%' GROUP BY id_aps ORDER BY total DESC LIMIT 1"
-                                        }
                                     }
                                     
                                     let dict = (name == "mariadb_query") ? ["query": argsRaw] : ["table": argsRaw]
