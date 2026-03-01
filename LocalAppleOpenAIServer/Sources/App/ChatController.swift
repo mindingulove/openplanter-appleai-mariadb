@@ -33,7 +33,7 @@ actor ModelPool {
         if let envWorkers = ProcessInfo.processInfo.environment["APPLE_BRIDGE_WORKERS"], let count = Int(envWorkers) {
             self.maxWorkers = count
         } else {
-            self.maxWorkers = 32
+            self.maxWorkers = 45 // Increased cap to 45
         }
         
         print("🧠 Model Pool: Dynamic mode enabled (Cap: \(maxWorkers) workers)")
@@ -52,6 +52,10 @@ actor ModelPool {
         let newWorker = ModelWorker(id: workerID)
         workerDict[workerID] = newWorker
         return newWorker
+    }
+
+    func activeWorkerCount() -> Int {
+        return workerDict.count
     }
 }
 
@@ -181,7 +185,19 @@ final class ChatController: @unchecked Sendable {
                 )
             )
             
-            return try await responseObj.encodeResponse(for: req)
+            // DYNAMICALLY INJECT WORKER COUNT
+            let activeCount = await pool.activeWorkerCount()
+            var rawRes = try JSONEncoder().encode(responseObj)
+            if var json = try JSONSerialization.jsonObject(with: rawRes) as? [String: Any],
+               var usage = json["usage"] as? [String: Any] {
+                usage["active_workers"] = activeCount
+                json["usage"] = usage
+                rawRes = try JSONSerialization.data(withJSONObject: json)
+            }
+            
+            let res = Response(status: .ok, body: .init(data: rawRes))
+            res.headers.replaceOrAdd(name: .contentType, value: "application/json")
+            return res
             
         } catch {
             print("ChatController: ERROR - \(error)")

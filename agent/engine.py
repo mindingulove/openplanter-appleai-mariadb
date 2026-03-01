@@ -420,6 +420,7 @@ class RLMEngine:
                             "tool_call_names": [tc.name for tc in turn.tool_calls],
                             "input_tokens": turn.input_tokens,
                             "output_tokens": turn.output_tokens,
+                            "active_workers": turn.usage.get("active_workers") if hasattr(turn, "usage") and isinstance(turn.usage, dict) else None,
                             "elapsed_sec": round(elapsed, 2),
                             "is_final": False,
                         }

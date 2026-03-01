@@ -578,6 +578,7 @@ class _StepState:
     model_elapsed_sec: float = 0.0
     input_tokens: int = 0
     output_tokens: int = 0
+    active_workers: int | None = None
     tool_calls: list[_ToolCallRecord] = field(default_factory=list)
 
 
@@ -789,6 +790,7 @@ class RichREPL:
                 model_elapsed_sec=step_event.get("elapsed_sec", 0.0),
                 input_tokens=step_event.get("input_tokens", 0),
                 output_tokens=step_event.get("output_tokens", 0),
+                active_workers=step_event.get("active_workers"),
             )
             return
 
@@ -849,6 +851,8 @@ class RichREPL:
             right_parts.append(
                 f"{_format_token_count(step.input_tokens)}in/{_format_token_count(step.output_tokens)}out"
             )
+        if step.active_workers is not None:
+            right_parts.append(f"{step.active_workers} workers")
         right_parts.append(f"[{ctx_str}]")
         right = " | ".join(right_parts) if right_parts else ""
         self.console.rule(f"[bold]{left}[/bold][dim]{right}[/dim]", style="cyan")
