@@ -158,8 +158,9 @@ class RLMEngine:
         if is_apple:
             self.config.max_steps_per_call = 60
             essential_tools = {
-                "mariadb_query", "mariadb_export", "read_data_chunk", "summarize_data",
-                "compress_context", "read_file", "write_file", "run_shell", 
+                "mariadb_query", "mariadb_export", "mariadb_search", "mariadb_sample",
+                "read_data_chunk", "summarize_data", "compress_context", 
+                "read_file", "write_file", "run_shell", 
                 "think", "list_files", "search_files", "subtask", "execute"
             }
             tool_defs = [d for d in tool_defs if d["name"] in essential_tools]
@@ -812,6 +813,21 @@ class RLMEngine:
                 return False, "mariadb_query requires query"
             db_override = args.get("database")
             return False, self.tools.mariadb_query(query, database=str(db_override) if db_override else None)
+
+        if name == "mariadb_search":
+            table = str(args.get("table", "")).strip()
+            query = str(args.get("query", "")).strip()
+            if not table or not query:
+                return False, "mariadb_search requires table and query"
+            db_override = args.get("database")
+            return False, self.tools.mariadb_search(table, query, database=str(db_override) if db_override else None)
+
+        if name == "mariadb_sample":
+            table = str(args.get("table", "")).strip()
+            if not table:
+                return False, "mariadb_sample requires table"
+            db_override = args.get("database")
+            return False, self.tools.mariadb_sample(table, database=str(db_override) if db_override else None)
 
         if name == "mariadb_export":
             query = str(args.get("query", "")).strip()

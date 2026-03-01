@@ -401,6 +401,46 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "mariadb_query",
+        "description": "Execute a SQL query against MariaDB and return formatted results.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The SQL query to run."},
+                "database": {"type": "string", "description": "Optional database name."},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "mariadb_search",
+        "description": "Search for a string across ALL columns in a table. Use this to find specific data when you don't know the column names.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "table": {"type": "string", "description": "The table to search in."},
+                "query": {"type": "string", "description": "The string to search for."},
+                "database": {"type": "string", "description": "Optional database name."},
+            },
+            "required": ["table", "query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "mariadb_sample",
+        "description": "Show 5 diverse example rows from a table to understand the format and data quality.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "table": {"type": "string", "description": "The table to sample."},
+                "database": {"type": "string", "description": "Optional database name."},
+            },
+            "required": ["table"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "mariadb_export",
         "description": "Execute a SQL query and save the full result to a temporary artifact. Returns an ID. Use this when you expect a large result set.",
         "parameters": {

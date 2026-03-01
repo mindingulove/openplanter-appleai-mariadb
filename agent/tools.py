@@ -44,6 +44,26 @@ class WorkspaceTools:
     _db_conn: Any = field(init=False, default=None)
     _db_params: dict[str, Any] = field(init=False, default_factory=dict)
 
+    def mariadb_search(self, table: str, query: str, database: str | None = None) -> str:
+        """Search for a string across ALL columns in a specific table."""
+        try:
+            # 1. Get columns
+            describe_res = self.mariadb_query(f"DESCRIBE {table}", database=database, format="json")
+            import json
+            cols_data = json.loads(describe_res)
+            cols = [c["Field"] for i, c in enumerate(cols_data)]
+            
+            # 2. Build massive OR LIKE query
+            where_clauses = [f"`{c}` LIKE '%{query}%'" for c in cols]
+            sql = f"SELECT * FROM `{table}` WHERE {' OR '.join(where_clauses)} LIMIT 5"
+            return self.mariadb_query(sql, database=database)
+        except Exception as e:
+            return f"Search failed: {e}"
+
+    def mariadb_sample(self, table: str, database: str | None = None) -> str:
+        """Quickly see 5 example rows from a table to understand the data format."""
+        return self.mariadb_query(f"SELECT * FROM `{table}` LIMIT 5", database=database)
+
     def _get_db_conn(self, database: str | None = None) -> Any:
         import pymysql
         # Ensure each thread has its own connection (pymysql is not thread-safe)
