@@ -86,20 +86,26 @@ final class ChatController: @unchecked Sendable {
         var discoveryAnchor = ""
         var recentUserPart = ""
         var lastObservation = ""
+        var errorAlert = ""
         
         if let sys = chatReq.messages.first(where: { $0.role == "system" }) {
             systemPart = String((sys.content ?? "").prefix(800))
         }
         
-        // SMART ANCHOR: Find any successful table structure or header result
+        // Find Anchors and Errors
         for msg in chatReq.messages {
-            if msg.role != "user" && msg.role != "system" {
-                let content = msg.content ?? ""
-                // Catch SHOW TABLES, DESCRIBE, or SELECT * headers
-                if content.contains("Tables_in") || content.contains("Field") || content.contains(" | ") {
-                    discoveryAnchor = String(content.prefix(1500))
-                    break
-                }
+            let content = msg.content ?? ""
+            
+            // Priority 1: DATABASE SCHEMA ANCHOR
+            if content.contains("Tables_in") || content.contains("Field") || content.contains(" | ") {
+                discoveryAnchor = String(content.prefix(1500))
+            }
+            
+            // Priority 2: CRITICAL ERRORS
+            if content.contains("Unknown column") {
+                errorAlert = "\n⚠️ CRITICAL ERROR: You just tried to access a column that DOES NOT EXIST. You MUST call DESCRIBE table_name immediately to find the real column names."
+            } else if content.contains("SQL syntax") {
+                errorAlert = "\n⚠️ CRITICAL ERROR: Your previous SQL query had a SYNTAX ERROR. Reformulate it carefully (use backticks for words like 'count' or 'index')."
             }
         }
         
@@ -114,19 +120,18 @@ final class ChatController: @unchecked Sendable {
         let prompt = """
         \(systemPart)
         
-        DATABASE SCHEMA (KNOWN):
+        DATABASE SCHEMA:
         \(discoveryAnchor)
         
         LAST TOOL OUTPUT:
         \(lastObservation)
+        \(errorAlert)
         
         GOAL:
         \(recentUserPart)
         
-        INSTRUCTION: Solve the GOAL. 
-        - Use EXACT table and column names from the SCHEMA section.
-        - If column names are unknown, you MUST call mariadb_query("DESCRIBE table").
-        - Output format: [TOOL: name("arguments")]
+        INSTRUCTION: If errorAlert is present, SOLVE IT FIRST with DESCRIBE. 
+        Output format: [TOOL: mariadb_query("...")]
         Assistant:
         """
         
@@ -141,8 +146,6 @@ final class ChatController: @unchecked Sendable {
             
             // --- PRECISION TOOL CALL PARSING ---
             var toolCalls: [OpenAIToolCall] = []
-            
-            // Non-greedy pattern specifically looking for our tags
             let pattern = "\\[TOOL:\\s*([a-zA-Z0-9_]+)\\s*\\((.*?)\\)\\]"
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
                 let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
@@ -160,7 +163,6 @@ final class ChatController: @unchecked Sendable {
                         if argsRaw.hasPrefix("{") && argsRaw.hasSuffix("}") {
                             finalArgsStr = argsRaw
                         } else {
-                            // SAFE RECOVERY: Escape quotes and wrap in JSON
                             let cleanVal = argsRaw.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
                             var dict: [String: String] = [:]
                             if name == "mariadb_query" || name == "mariadb_export" {
