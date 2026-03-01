@@ -39,6 +39,7 @@ class WorkspaceTools:
     mariadb_database: str | None = None
     command_timeout_sec: int = 45
     max_shell_output_chars: int = 16000
+    shell: str = "/bin/sh"
 
     _bg_jobs: dict[int, tuple[subprocess.Popen, Any, Path]] = field(init=False)
     _bg_next_id: int = field(init=False)
@@ -341,6 +342,7 @@ class WorkspaceTools:
             proc = subprocess.run(
                 command,
                 shell=True,
+                executable=self.shell,
                 cwd=self.root,
                 capture_output=True,
                 text=True,
@@ -366,6 +368,7 @@ class WorkspaceTools:
             proc = subprocess.Popen(
                 command,
                 shell=True,
+                executable=self.shell,
                 cwd=self.root,
                 stdout=out_file,
                 stderr=subprocess.STDOUT,

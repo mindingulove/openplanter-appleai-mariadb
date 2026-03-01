@@ -76,7 +76,7 @@ class AgentConfig:
             return
 
         def find_bridge_port():
-            # 1. Check for the port file in /tmp (most reliable source of truth)
+            # 1. Check for the port file in /tmp
             tmp_file = Path("/tmp/openplanter_bridge_port")
             if tmp_file.exists():
                 try:
@@ -84,12 +84,12 @@ class AgentConfig:
                     if p.isdigit(): return p
                 except Exception: pass
             
-            # 2. Fallback: Scan running processes with ps + lsof
+            # 2. Fallback: Scan running processes
             try:
+                import subprocess
                 ps_out = subprocess.check_output(["ps", "aux"], text=True)
                 for line in ps_out.splitlines():
                     if "ps aux" in line: continue
-                    # Match our binary or the swift run pattern
                     if "apple-bridge" in line or "App serve" in line:
                         parts = line.split()
                         if len(parts) < 2: continue
@@ -102,37 +102,37 @@ class AgentConfig:
             except Exception: pass
             return None
 
-            # 3. Clean up any existing instances first to ensure a fresh session
-            print("🛑 Cleaning up Apple Bridge processes...")
-            subprocess.run(["pkill", "-9", "apple-bridge"], capture_output=True)
-            subprocess.run(["pkill", "-9", "App"], capture_output=True)
-            try: Path("/tmp/openplanter_bridge_port").unlink(missing_ok=True)
-            except: pass
-            
-            # Small delay to let OS release the port
-            time.sleep(0.5)
+        # 3. Clean up any existing instances first to ensure a fresh session
+        print("🛑 Cleaning up Apple Bridge processes...")
+        subprocess.run(["pkill", "-9", "apple-bridge"], capture_output=True)
+        subprocess.run(["pkill", "-9", "App"], capture_output=True)
+        try: Path("/tmp/openplanter_bridge_port").unlink(missing_ok=True)
+        except: pass
+        
+        # Small delay to let OS release the port
+        time.sleep(0.5)
 
-            # 4. Start the bridge
-            bridge_bin = self.workspace / "agent" / "appleai" / "apple-bridge"
-            if bridge_bin.exists():
-                print(f"🛠 Starting local Apple Bridge...")
-                subprocess.Popen(
-                    [str(bridge_bin), "serve"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    start_new_session=True
-                )
-                # Wait up to 20 seconds for it to start and bind
-                for i in range(200):
-                    time.sleep(0.1)
-                    port = find_bridge_port()
-                    if port:
-                        print(f"✅ Bridge started on port {port}.")
-                        if is_template:
-                            self.apple_base_url = self.apple_base_url.replace("{port}", port)
-                        else:
-                            self.apple_base_url = f"http://127.0.0.1:{port}/v1"
-                        self.apple_discovered = True
-                        return
+        # 4. Start the bridge
+        bridge_bin = self.workspace / "agent" / "appleai" / "apple-bridge"
+        if bridge_bin.exists():
+            print(f"🛠 Starting local Apple Bridge...")
+            subprocess.Popen(
+                [str(bridge_bin), "serve"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            # Wait up to 20 seconds for it to start and bind
+            for i in range(200):
+                time.sleep(0.1)
+                port = find_bridge_port()
+                if port:
+                    print(f"✅ Bridge started on port {port}.")
+                    if is_template:
+                        self.apple_base_url = self.apple_base_url.replace("{port}", port)
+                    else:
+                        self.apple_base_url = f"http://127.0.0.1:{port}/v1"
+                    self.apple_discovered = True
+                    return
         
         # Final fallback
         if is_template:
