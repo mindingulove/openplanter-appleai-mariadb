@@ -1,0 +1,15 @@
+.env
+.env.*
+node_modules/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.build/
+*.cast
+*.mp4
+.openplanter/
+.venv/
+.github_token
+LocalAppleOpenAIServer/.build/
