@@ -91,11 +91,13 @@ final class ChatController: @unchecked Sendable {
             systemPart = String((sys.content ?? "").prefix(800))
         }
         
+        // SMART ANCHOR: Find any successful table structure or header result
         for msg in chatReq.messages {
             if msg.role != "user" && msg.role != "system" {
                 let content = msg.content ?? ""
-                if content.contains("Tables_in") || content.contains("Field") {
-                    discoveryAnchor = String(content.prefix(1000))
+                // Catch SHOW TABLES, DESCRIBE, or SELECT * headers
+                if content.contains("Tables_in") || content.contains("Field") || content.contains(" | ") {
+                    discoveryAnchor = String(content.prefix(1500))
                     break
                 }
             }
@@ -112,16 +114,19 @@ final class ChatController: @unchecked Sendable {
         let prompt = """
         \(systemPart)
         
-        SCHEMA:
+        DATABASE SCHEMA (KNOWN):
         \(discoveryAnchor)
         
-        LAST RESULT:
+        LAST TOOL OUTPUT:
         \(lastObservation)
         
         GOAL:
         \(recentUserPart)
         
-        ACT NOW. Output ONLY: [TOOL: name("args")]
+        INSTRUCTION: Solve the GOAL. 
+        - Use EXACT table and column names from the SCHEMA section.
+        - If column names are unknown, you MUST call mariadb_query("DESCRIBE table").
+        - Output format: [TOOL: name("arguments")]
         Assistant:
         """
         
@@ -137,7 +142,7 @@ final class ChatController: @unchecked Sendable {
             // --- PRECISION TOOL CALL PARSING ---
             var toolCalls: [OpenAIToolCall] = []
             
-            // Non-greedy pattern to avoid consuming multiple tool blocks
+            // Non-greedy pattern specifically looking for our tags
             let pattern = "\\[TOOL:\\s*([a-zA-Z0-9_]+)\\s*\\((.*?)\\)\\]"
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
                 let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
@@ -155,7 +160,7 @@ final class ChatController: @unchecked Sendable {
                         if argsRaw.hasPrefix("{") && argsRaw.hasSuffix("}") {
                             finalArgsStr = argsRaw
                         } else {
-                            // SMART RECOVERY: Escape quotes and wrap in JSON
+                            // SAFE RECOVERY: Escape quotes and wrap in JSON
                             let cleanVal = argsRaw.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
                             var dict: [String: String] = [:]
                             if name == "mariadb_query" || name == "mariadb_export" {
@@ -218,7 +223,7 @@ final class ChatController: @unchecked Sendable {
             
         } catch {
             print("ChatController: ERROR - \(error)")
-            throw Abort(.internalServerError, reason: "Apple Bridge Error: \(error.localizedDescription)")
+            throw Abort(.internalServerError, reason: "Apple Foundation Model error: \(error.localizedDescription)")
         }
     }
 

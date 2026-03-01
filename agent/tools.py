@@ -95,8 +95,8 @@ class WorkspaceTools:
         self._scope_local = threading.local()
 
     def _clip(self, text: str, max_chars: int) -> str:
-        # If in Apple mode, we force a much smaller clip for all observations
-        effective_max = 1000 if self.apple_mode else max_chars
+        # Increased to 2500 for Apple mode to ensure schema fits in context
+        effective_max = 2500 if self.apple_mode else max_chars
         if len(text) <= effective_max:
             return text
         half = effective_max // 2
