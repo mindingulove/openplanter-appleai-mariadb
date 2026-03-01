@@ -103,24 +103,27 @@ final class ChatController: @unchecked Sendable {
             defer { Task { await worker.setBusy(false) } }
 
             let safePrompt = String(prompt.prefix(2000))
+            
+            // DEBUG: Save exact prompt to disk
+            try? safePrompt.write(to: URL(fileURLWithPath: "/tmp/debug_prompt_step_\(counter).txt"), atomically: true, encoding: .utf8)
+            
             let text = try await worker.respond(to: safePrompt)
             let trimmed = text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             var toolCalls: [OpenAIToolCall] = []
             
             let knownTools = ["mariadb_query", "mariadb_search", "mariadb_sample", "think", "read_file"]
             
-            // --- STRUCTURAL PARSING (BULLETPROOF & MULTI-LINE) ---
-            let pattern = "CALL_([a-zA-Z0-9_]+)\\s*\\((.*?)\\)"
-            if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
-                let nsRange = NSRange(trimmed.startIndex..., in: trimmed)
-                let matches = regex.matches(in: trimmed, options: [], range: nsRange)
-                for match in matches {
-                    if let nameRange = Range(match.range(at: 1), in: trimmed),
-                       let argsRange = Range(match.range(at: 2), in: trimmed) {
-                        let name = String(trimmed[nameRange]).trimmingCharacters(in: CharacterSet.whitespaces)
-                        
-                        if knownTools.contains(name) {
-                            var argsRaw = String(trimmed[argsRange]).trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            // --- STRUCTURAL PARSING (BULLETPROOF & MULTI-LINE & NESTED PARENS) ---
+            let parts = trimmed.components(separatedBy: "CALL_")
+            for part in parts {
+                if part.isEmpty || !part.contains("(") { continue }
+                if let parenIdx = part.firstIndex(of: "(") {
+                    let name = String(part[..<parenIdx]).trimmingCharacters(in: CharacterSet.whitespaces)
+                    
+                    if knownTools.contains(name) {
+                        let afterParen = String(part[part.index(after: parenIdx)...])
+                        if let lastParenIdx = afterParen.lastIndex(of: ")") {
+                            var argsRaw = String(afterParen[..<lastParenIdx]).trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
                             
                             // Strip triple quotes first
                             argsRaw = argsRaw.replacingOccurrences(of: "\"\"\"", with: "")
@@ -132,7 +135,14 @@ final class ChatController: @unchecked Sendable {
                             } else if argsRaw.hasPrefix("'") && argsRaw.hasSuffix("'") {
                                 argsRaw = String(argsRaw.dropFirst().dropLast())
                             }
-                            argsRaw = argsRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+                            argsRaw = argsRaw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+                            
+                            if name == "mariadb_query" {
+                                let lsql = argsRaw.lowercased()
+                                if lsql.contains("select") && !lsql.contains("from") {
+                                    argsRaw += " FROM vw_aps_faixa_etaria"
+                                }
+                            }
                             
                             let dict = (name == "mariadb_query") ? ["query": argsRaw] : ["table": argsRaw]
                             if let data = try? JSONSerialization.data(withJSONObject: dict), let s = String(data: data, encoding: .utf8) {
