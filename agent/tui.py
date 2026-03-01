@@ -567,6 +567,7 @@ class _ToolCallRecord:
     key_arg: str
     elapsed_sec: float
     worker_id: int | None = None
+    observation: str = ""
     is_error: bool = False
 
 
@@ -806,13 +807,15 @@ class RichREPL:
         if self._current_step is not None:
             key_arg = _extract_key_arg(name, action.get("arguments", {}))
             elapsed = step_event.get("elapsed_sec", 0.0)
-            is_error = bool(step_event.get("observation", "").startswith("Tool ") and "crashed" in step_event.get("observation", ""))
+            observation = step_event.get("observation", "")
+            is_error = bool(observation.startswith("Tool ") and "crashed" in observation)
             self._current_step.tool_calls.append(
                 _ToolCallRecord(
                     name=name,
                     key_arg=key_arg,
                     elapsed_sec=elapsed,
                     worker_id=step_event.get("worker_id"),
+                    observation=observation,
                     is_error=is_error,
                 )
             )
@@ -889,6 +892,13 @@ class RichREPL:
                 parts.append(f"  \"{tc.key_arg}\"", style="dim")
             parts.append(f"  {tc.elapsed_sec:.1f}s", style="dim")
             self.console.print(parts)
+
+            # Render observation preview
+            if tc.observation:
+                obs_preview = tc.observation.strip().splitlines()[0]
+                if len(obs_preview) > 120:
+                    obs_preview = obs_preview[:117] + "..."
+                self.console.print(Text(f"      -> {obs_preview}", style="dim italic"))
 
     # ------------------------------------------------------------------
     # run — main REPL loop

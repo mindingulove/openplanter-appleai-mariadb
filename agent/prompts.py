@@ -388,6 +388,7 @@ def build_system_prompt(
     if recursive and not minimal:
         prompt += RECURSIVE_SECTION
     if mariadb_db:
+        prompt += "\n\n== DATABASE CONTEXT ==\n"
         prompt += MARIADB_SECTION.format(db_name=mariadb_db)
     if acceptance_criteria and not minimal:
         prompt += ACCEPTANCE_CRITERIA_SECTION
