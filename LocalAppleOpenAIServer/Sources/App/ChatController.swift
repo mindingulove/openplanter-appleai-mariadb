@@ -13,7 +13,7 @@ actor ModelWorker {
     }
     
     func respond(to prompt: String) async throws -> String {
-        print("Worker [\(id)]: Prompt: \(prompt.count) chars")
+        print("Worker [\(id)]: Thinking...")
         fflush(stdout)
         
         let response = try await session.respond(to: prompt)
@@ -33,10 +33,16 @@ actor ModelPool {
         if let envWorkers = ProcessInfo.processInfo.environment["APPLE_BRIDGE_WORKERS"], let count = Int(envWorkers) {
             self.maxWorkers = count
         } else {
-            self.maxWorkers = 45
+            self.maxWorkers = 120 // Increased cap to 120
         }
         
         print("🧠 Model Pool: Dynamic mode enabled (Cap: \(maxWorkers) workers)")
+        
+        // PRE-WARM 20 WORKERS
+        print("🔥 Pre-warming 20 workers...")
+        for i in 0..<20 {
+            workerDict[i] = ModelWorker(id: i)
+        }
         fflush(stdout)
     }
     
@@ -47,8 +53,6 @@ actor ModelPool {
             return existing
         }
         
-        print("🚀 Model Pool: Spawning new worker [\(workerID)] on demand...")
-        fflush(stdout)
         let newWorker = ModelWorker(id: workerID)
         workerDict[workerID] = newWorker
         return newWorker
@@ -81,38 +85,40 @@ final class ChatController: @unchecked Sendable {
     func createChatCompletion(req: Request) async throws -> Response {
         let chatReq = try req.content.decode(OpenAIChatRequest.self)
         
-        // --- ANCHORED PROMPT RECONSTRUCTION (ULTRA-CONSERVATIVE) ---
+        // --- ANCHORED PROMPT RECONSTRUCTION ---
         var systemPart = ""
         var toolsPart = ""
         var discoveryAnchor = ""
         var recentUserPart = ""
         var lastObservation = ""
         
-        // 1. System Prompt
         if let sys = chatReq.messages.first(where: { $0.role == "system" }) {
             systemPart = String((sys.content ?? "").prefix(800))
         }
         
-        // 2. Dynamic Tool Definitions
         if let tools = chatReq.tools {
             toolsPart = "Available Tools:\n"
-            for t in tools.prefix(10) { 
+            for t in tools.prefix(12) { 
                 let params = t.function.parameters?.stringify() ?? "{}"
                 toolsPart += "- \(t.function.name)(\(params))\n"
             }
         }
         
-        // 3. Discovery Anchor (The VERY FIRST tool result)
-        if let firstObs = chatReq.messages.first(where: { $0.role != "user" && $0.role != "system" }) {
-            discoveryAnchor = String((firstObs.content ?? "").prefix(1000))
+        // SMART ANCHOR: Find the first successful schema query (SHOW/DESCRIBE)
+        for msg in chatReq.messages {
+            if msg.role != "user" && msg.role != "system" {
+                let content = msg.content ?? ""
+                if content.contains("Tables_in") || content.contains("Field") || content.contains("Type") {
+                    discoveryAnchor = String(content.prefix(1200))
+                    break
+                }
+            }
         }
         
-        // 4. Most Recent User Instruction
         if let lastUser = chatReq.messages.last(where: { $0.role == "user" }) {
             recentUserPart = String((lastUser.content ?? "").prefix(600))
         }
         
-        // 5. Last Observation (Latest Result)
         if let lastObs = chatReq.messages.last(where: { $0.role != "user" && $0.role != "system" }) {
             lastObservation = String((lastObs.content ?? "").prefix(1200))
         }
@@ -122,24 +128,22 @@ final class ChatController: @unchecked Sendable {
         
         \(toolsPart)
         
-        SCHEMA ANCHOR:
+        DATABASE SCHEMA (ANCHOR):
         \(discoveryAnchor)
         
-        LATEST DATA:
+        LAST TOOL RESULT:
         \(lastObservation)
         
-        USER GOAL:
+        GOAL:
         \(recentUserPart)
         
-        TASK: If LATEST DATA answers USER GOAL, provide final answer. Else:
-        CALL: tool_name({"arg": "val"})
+        CRITICAL: If LAST TOOL RESULT failed or was empty, try a different SQL query.
+        To use a tool, output: CALL: tool_name({"arg": "val"})
         Assistant:
         """
         
-        print("Final Reconstructed Prompt: \(prompt.count) chars")
-        fflush(stdout)
-        
-        let worker = await pool.getWorker(for: nextIndex())
+        let workerIndex = nextIndex()
+        let worker = await pool.getWorker(for: workerIndex)
         
         do {
             let generatedText = try await worker.respond(to: prompt)
@@ -163,8 +167,6 @@ final class ChatController: @unchecked Sendable {
                                 args = "{\"query\": \(args)}"
                             } else if name == "read_file" || name == "list_files" {
                                 args = "{\"path\": \(args)}"
-                            } else if name == "think" {
-                                args = "{\"note\": \(args)}"
                             }
                         }
                         
@@ -178,6 +180,7 @@ final class ChatController: @unchecked Sendable {
                 }
             }
             
+            let activeCount = await pool.activeWorkerCount()
             let responseObj = OpenAIChatResponse(
                 id: "chatcmpl-" + UUID().uuidString,
                 object: "chat.completion",
@@ -199,12 +202,11 @@ final class ChatController: @unchecked Sendable {
                 )
             )
             
-            // DYNAMICALLY INJECT WORKER COUNT
-            let activeCount = await pool.activeWorkerCount()
             var rawRes = try JSONEncoder().encode(responseObj)
             if var json = try JSONSerialization.jsonObject(with: rawRes) as? [String: Any],
                var usage = json["usage"] as? [String: Any] {
                 usage["active_workers"] = activeCount
+                usage["worker_id"] = workerIndex % 120
                 json["usage"] = usage
                 rawRes = try JSONSerialization.data(withJSONObject: json)
             }
@@ -225,7 +227,7 @@ final class ChatController: @unchecked Sendable {
             let text: String
         }
         let summarizeReq = try req.content.decode(SummarizeRequest.self)
-        let prompt = "Squeeze this data into one core fact sentence (max 150 chars): \(summarizeReq.text.prefix(2000))\nFact:"
+        let prompt = "Squeeze this data into one core fact sentence: \(summarizeReq.text.prefix(2500))\nFact:"
         let worker = await pool.getWorker(for: nextIndex())
         return try await worker.respond(to: prompt)
     }

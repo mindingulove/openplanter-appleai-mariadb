@@ -471,14 +471,14 @@ class RLMEngine:
             if turn.text:
                 self._emit(f"[d{depth}/s{step}] model text: {turn.text[:200]}", on_event)
 
-            # Execute all tool calls — parallel for subtask/execute, sequential for others.
+            # Execute all tool calls in parallel (except think which is internal).
             results: list[ToolResult] = []
             final_answer: str | None = None
 
-            _PARALLEL_TOOLS = {"subtask", "execute"}
+            _SEQUENTIAL_TOOLS = {"think"} # Only think remains sequential
 
-            sequential = [(i, tc) for i, tc in enumerate(turn.tool_calls) if tc.name not in _PARALLEL_TOOLS]
-            parallel = [(i, tc) for i, tc in enumerate(turn.tool_calls) if tc.name in _PARALLEL_TOOLS]
+            sequential = [(i, tc) for i, tc in enumerate(turn.tool_calls) if tc.name in _SEQUENTIAL_TOOLS]
+            parallel = [(i, tc) for i, tc in enumerate(turn.tool_calls) if tc.name not in _SEQUENTIAL_TOOLS]
 
             # If no factory and we have execute calls, fall back to sequential.
             if not self.model_factory and any(tc.name == "execute" for _, tc in parallel):

@@ -566,6 +566,7 @@ class _ToolCallRecord:
     name: str
     key_arg: str
     elapsed_sec: float
+    worker_id: int | None = None
     is_error: bool = False
 
 
@@ -579,6 +580,7 @@ class _StepState:
     input_tokens: int = 0
     output_tokens: int = 0
     active_workers: int | None = None
+    worker_id: int | None = None
     tool_calls: list[_ToolCallRecord] = field(default_factory=list)
 
 
@@ -791,6 +793,7 @@ class RichREPL:
                 input_tokens=step_event.get("input_tokens", 0),
                 output_tokens=step_event.get("output_tokens", 0),
                 active_workers=step_event.get("active_workers"),
+                worker_id=step_event.get("worker_id"),
             )
             return
 
@@ -809,6 +812,7 @@ class RichREPL:
                     name=name,
                     key_arg=key_arg,
                     elapsed_sec=elapsed,
+                    worker_id=step_event.get("worker_id"),
                     is_error=is_error,
                 )
             )
@@ -843,6 +847,8 @@ class RichREPL:
         # Step header rule
         left = f" {ts}  Step {step.step} "
         right_parts = []
+        if step.worker_id is not None:
+            right_parts.append(f"w{step.worker_id}")
         if step.depth > 0:
             right_parts.append(f"depth {step.depth}")
         if step.max_steps:
@@ -873,10 +879,12 @@ class RichREPL:
             connector = "\u2514\u2500" if is_last else "\u251c\u2500"
             name_style = "bold red" if tc.is_error else ""
 
-            # Build line: connector + name + key_arg + elapsed
+            # Build line: connector + name + key_arg + elapsed + [wID]
             parts = Text()
             parts.append(f"  {connector} ", style="dim")
             parts.append(f"{tc.name}", style=name_style)
+            if tc.worker_id is not None:
+                parts.append(f" [w{tc.worker_id}]", style="dim")
             if tc.key_arg:
                 parts.append(f"  \"{tc.key_arg}\"", style="dim")
             parts.append(f"  {tc.elapsed_sec:.1f}s", style="dim")
