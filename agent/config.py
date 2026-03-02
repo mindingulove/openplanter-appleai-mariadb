@@ -223,7 +223,7 @@ class AgentConfig:
             mlx_python = _find_mlx_python()
             decode_concurrency = os.getenv("OPENPLANTER_MLX_DECODE_CONCURRENCY", "2").strip() or "2"
             prompt_concurrency = os.getenv("OPENPLANTER_MLX_PROMPT_CONCURRENCY", "1").strip() or "1"
-            max_tokens = os.getenv("OPENPLANTER_MLX_MAX_TOKENS", "2048").strip() or "2048"
+            max_tokens = os.getenv("OPENPLANTER_MLX_MAX_TOKENS", "4096").strip() or "4096"
             print(
                 "   MLX launch profile: "
                 f"decode={decode_concurrency}, prompt={prompt_concurrency}, max_tokens={max_tokens}, "

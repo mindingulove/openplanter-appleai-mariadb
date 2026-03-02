@@ -131,7 +131,7 @@ def build_model_factory(cfg: AgentConfig) -> ModelFactory | None:
                 base_url=cfg.mlx_base_url,
                 reasoning_effort=effort,
                 timeout_sec=cfg.model_timeout_sec,
-                max_tokens=2048,
+                max_tokens=4096,
                 strict_tools=False,
             )
         if provider in ("openai", None) and cfg.openai_api_key:
@@ -247,7 +247,7 @@ def build_engine(cfg: AgentConfig) -> RLMEngine:
             base_url=cfg.mlx_base_url,
             reasoning_effort=cfg.reasoning_effort,
             timeout_sec=cfg.model_timeout_sec,
-            max_tokens=2048,
+            max_tokens=4096,
             strict_tools=False,
         )
     elif cfg.provider == "anthropic" and cfg.anthropic_api_key:

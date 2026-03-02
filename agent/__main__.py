@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider",
         default=None,
-        choices=["auto", "openai", "anthropic", "openrouter", "cerebras", "apple", "all"],
+        choices=["auto", "openai", "anthropic", "openrouter", "cerebras", "apple", "mlx", "all"],
         help="Model provider. Use 'all' only with --list-models.",
     )
     parser.add_argument("--model", help="Model name (use 'newest' to auto-select latest from API).")
@@ -66,6 +66,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--default-model-cerebras",
         help="Persist workspace default model for Cerebras provider.",
+    )
+    parser.add_argument(
+        "--default-model-mlx",
+        help="Persist workspace default model for MLX provider.",
     )
     parser.add_argument(
         "--default-use-mariadb",
@@ -173,7 +177,7 @@ def _format_ts(ts: int) -> str:
 
 def _resolve_provider(requested: str, creds: CredentialBundle) -> str:
     requested = requested.strip().lower()
-    if requested in {"openai", "anthropic", "openrouter", "cerebras", "apple"}:
+    if requested in {"openai", "anthropic", "openrouter", "cerebras", "apple", "mlx"}:
         return requested
     if requested == "all":
         return "all"
@@ -193,9 +197,9 @@ def _resolve_provider(requested: str, creds: CredentialBundle) -> str:
 def _print_models(cfg: AgentConfig, requested_provider: str) -> int:
     providers: list[str]
     if requested_provider == "all":
-        providers = ["openai", "anthropic", "openrouter", "cerebras"]
+        providers = ["openai", "anthropic", "openrouter", "cerebras", "apple", "mlx"]
     elif requested_provider == "auto":
-        providers = ["openai", "anthropic", "openrouter", "cerebras"]
+        providers = ["openai", "anthropic", "openrouter", "cerebras", "apple", "mlx"]
     else:
         providers = [requested_provider]
 
@@ -336,6 +340,8 @@ def _apply_runtime_overrides(cfg: AgentConfig, args: argparse.Namespace, creds: 
             cfg.openrouter_base_url = args.base_url
         elif cfg.provider == "cerebras":
             cfg.cerebras_base_url = args.base_url
+        elif cfg.provider == "mlx":
+            cfg.mlx_base_url = args.base_url
         cfg.base_url = args.base_url
 
     if args.model:
@@ -360,6 +366,12 @@ def _apply_runtime_overrides(cfg: AgentConfig, args: argparse.Namespace, creds: 
         cfg.mariadb_password = args.mariadb_password
     if args.mariadb_database:
         cfg.mariadb_database = args.mariadb_database
+
+    # Local providers often need more time for first token / generation, and
+    # CLI provider selection happens after from_env timeout defaults.
+    if "OPENPLANTER_MODEL_TIMEOUT" not in os.environ:
+        if cfg.provider in {"apple", "mlx"} and cfg.model_timeout_sec < 600:
+            cfg.model_timeout_sec = 600
 
 
 def run_plain_repl(ctx: ChatContext) -> None:
@@ -414,6 +426,8 @@ def _apply_persistent_settings(
     if settings.apple_base_url:
         # Apply the setting (might be a template like {port})
         cfg.apple_base_url = settings.apple_base_url
+    if settings.mlx_base_url:
+        cfg.mlx_base_url = settings.mlx_base_url
     
     # Apply primary provider default if not set by CLI/Env
     if args.provider is None and "OPENPLANTER_PROVIDER" not in os.environ:
@@ -462,6 +476,9 @@ def _apply_persistent_settings(
     if args.default_model_cerebras is not None:
         settings.default_model_cerebras = args.default_model_cerebras.strip() or None
         changed = True
+    if args.default_model_mlx is not None:
+        settings.default_model_mlx = args.default_model_mlx.strip() or None
+        changed = True
     if args.default_use_mariadb is not None:
         settings.use_mariadb = "true" if args.default_use_mariadb else "false"
         changed = True
@@ -495,6 +512,7 @@ def _print_settings(settings: PersistentSettings) -> None:
     print(f"  default_model_anthropic: {settings.default_model_anthropic or '(unset)'}")
     print(f"  default_model_openrouter: {settings.default_model_openrouter or '(unset)'}")
     print(f"  default_model_cerebras: {settings.default_model_cerebras or '(unset)'}")
+    print(f"  default_model_mlx: {settings.default_model_mlx or '(unset)'}")
     print(f"  use_mariadb (default): {settings.use_mariadb or '(unset)'}")
 
 
@@ -520,6 +538,8 @@ def _has_non_interactive_command(args: argparse.Namespace) -> bool:
     if args.default_model_openrouter is not None:
         return True
     if args.default_model_cerebras is not None:
+        return True
+    if args.default_model_mlx is not None:
         return True
     return False
 
@@ -594,21 +614,32 @@ def main() -> None:
     if model_for_check and cfg.provider != "openrouter":
         inferred = infer_provider_for_model(model_for_check)
         if inferred and inferred != cfg.provider:
-            key = {
-                "openai": cfg.openai_api_key,
-                "anthropic": cfg.anthropic_api_key,
-                "openrouter": cfg.openrouter_api_key,
-                "cerebras": cfg.cerebras_api_key,
-                "apple": True, # Always considered configured
-            }.get(inferred)
-            if key:
-                cfg.provider = inferred
+            # If the user explicitly requested a provider via --provider, don't let
+            # a saved default model from a different provider silently override it.
+            # Discard the conflicting saved model; the provider default will be used.
+            if args.provider and args.provider not in {"auto"}:
+                cfg.model = ""
             else:
-                print(
-                    f"Model '{model_for_check}' requires provider '{inferred}' "
-                    f"but no API key is configured for it."
-                )
-                raise SystemExit(1)
+                key = {
+                    "openai": cfg.openai_api_key,
+                    "anthropic": cfg.anthropic_api_key,
+                    "openrouter": cfg.openrouter_api_key,
+                    "cerebras": cfg.cerebras_api_key,
+                    "apple": True,
+                    "mlx": True,
+                }.get(inferred)
+                if key:
+                    cfg.provider = inferred
+                else:
+                    print(
+                        f"Model '{model_for_check}' requires provider '{inferred}' "
+                        f"but no API key is configured for it."
+                    )
+                    raise SystemExit(1)
+
+    if "OPENPLANTER_MODEL_TIMEOUT" not in os.environ:
+        if cfg.provider in {"apple", "mlx"} and cfg.model_timeout_sec < 600:
+            cfg.model_timeout_sec = 600
 
     engine = build_engine(cfg)
     model_name = _get_model_display_name(engine)
