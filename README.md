@@ -3,12 +3,11 @@
 A recursive-language-model investigation agent with a terminal UI. This version is a specialized fork of the original OpenPlanter, enhanced for on-device performance and direct database integration.
 
 ### 🚀 How this fork differs:
-- **Local Apple Intelligence:** Native integration with macOS Sequoia+ via a dedicated Swift bridge. Run investigations fully local using Apple's Foundation Models with zero-config auto-discovery.
-- **Ultra-Aggressive Parallel Processing:** The local bridge features a resource-aware worker pool with **32 parallel AI sessions**, maximizing the throughput of your Mac's Silicon.
-- **Hard Token Limit Management:** Optimized for the **4,091-token hardware limit** of Apple Foundation Models. Implements intelligent prompt reconstruction and "Parallel AI Squeeze" summarization.
+- **Local MLX AI (8K Context):** Native integration with Apple Silicon via `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit`. Run investigations fully local with an **8,192-token context window** — 2× the capacity of the previous Apple Intelligence bridge. The MLX server is auto-discovered or auto-booted with zero config.
+- **Privacy-First by Default:** No cloud API keys required. All inference runs on-device using your Mac's GPU via the MLX framework.
 - **Direct Database Access:** Built-in support for MariaDB/MySQL. The agent treats your database as a first-class workspace component, autonomously discovering schemas and executing complex analytical queries.
 - **Deep Persistence:** Enhanced `settings.json` that remembers not just models, but custom provider URLs, database credentials, and dynamic port mappings using `{port}` templates.
-- **Optimized for Privacy:** Designed to work without cloud API keys by leveraging local silicon and local data stores.
+- **Multi-Provider:** Seamlessly switch between local MLX, OpenAI, Anthropic, OpenRouter, and Cerebras with a single flag.
 
 OpenPlanter ingests heterogeneous datasets — corporate registries, campaign finance records, lobbying disclosures, government contracts, and more — resolves entities across them, and surfaces non-obvious connections through evidence-backed analysis. It operates autonomously with file I/O, shell execution, web search, recursive sub-agent delegation, and direct database access. **The configured MariaDB/MySQL database is treated as an integral part of the agent's workspace.**
 
@@ -18,38 +17,50 @@ OpenPlanter ingests heterogeneous datasets — corporate registries, campaign fi
 # Install
 pip install -e .
 
-# Configure API keys (interactive prompt)
-openplanter-agent --configure-keys
+# Install MLX for on-device inference (Apple Silicon only)
+pip install mlx-lm
 
-# Launch the TUI
+# Launch with local MLX model (auto-boots server)
+python3 -m agent --provider mlx
+
+# Or launch the interactive TUI
 openplanter-agent --workspace /path/to/your/project
 ```
 
 Or run a single task headlessly:
 
 ```bash
-openplanter-agent --task "Cross-reference vendor payments against lobbying disclosures and flag overlaps" --workspace ./data
+openplanter-agent --provider mlx --task "Cross-reference vendor payments against lobbying disclosures and flag overlaps" --workspace ./data
 ```
 
 ## Supported Providers
 
-| Provider | Default Model | Env Var |
-|----------|---------------|---------|
-| **Apple** | `apple-foundation-model` | (Auto-boot / Local) |
+| Provider | Default Model | Notes |
+|----------|---------------|-------|
+| **MLX** | `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` | On-device, no API key, 8K context |
 | OpenAI | `gpt-5.2` | `OPENAI_API_KEY` |
 | Anthropic | `claude-opus-4-6` | `ANTHROPIC_API_KEY` |
 | OpenRouter | `anthropic/claude-sonnet-4-5` | `OPENROUTER_API_KEY` |
 | Cerebras | `qwen-3-235b-a22b-instruct-2507` | `CEREBRAS_API_KEY` |
 
-### 🍏 Apple Intelligence (On-Device)
-OpenPlanter supports running fully local on macOS via a dedicated Swift bridge.
-- **Zero-Config:** No API key is required for local use.
-- **Auto-Discovery:** Automatically detects the bridge port via `lsof` process scanning.
-- **Auto-Boot:** If the bridge isn't running, OpenPlanter automatically launches the optimized `apple-bridge` binary.
-- **Parallel Workers:** Scales to **32 parallel sessions** for maximum concurrent sub-tasks.
-- **AI Condensation:** Automatically summarizes long conversation history using a parallel background AI worker to stay within the **4,091-token** limit.
-- **Aggressive Observation Clipping:** Automatically truncates tool outputs (SQL, shell, file reads) to 1,000 characters when in Apple mode to prevent context crashes.
-- **Discovery-First Workflow:** Forced system-level strategy that prioritizes `DESCRIBE` and `LIMIT` sampling before full data analysis.
+### 🧠 MLX On-Device Inference
+
+OpenPlanter supports running fully local on Apple Silicon using the [MLX](https://github.com/ml-explore/mlx) framework.
+
+- **Zero-Config:** No API key required. Just install `mlx-lm` and run with `--provider mlx`.
+- **Auto-Discovery:** Detects any already-running `mlx_lm` server via process scanning.
+- **Auto-Boot:** If no server is found, automatically launches one with the configured model.
+- **8K Context Window:** Uses `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` (~4GB RAM), which supports 8,192 tokens of context — double the previous Apple Intelligence limit.
+- **Configurable Model:** Override via `OPENPLANTER_MODEL` or `--model mlx-community/YOUR-MODEL`.
+- **Configurable Tokens:** Set `OPENPLANTER_MLX_MAX_TOKENS` (default: 2048 output tokens per response).
+
+```bash
+# Use a larger model
+python3 -m agent --provider mlx --model mlx-community/Qwen2.5-Coder-14B-Instruct-4bit
+
+# Use a smaller/faster model
+python3 -m agent --provider mlx --model mlx-community/Qwen2.5-Coder-3B-Instruct-4bit
+```
 
 ### 🌐 OpenRouter Integration
 OpenPlanter works natively with OpenRouter. If a model name contains a `/` (e.g. `google/gemini-2.0-flash-001`), the agent automatically routes through OpenRouter using your `OPENROUTER_API_KEY`.
@@ -93,8 +104,8 @@ openplanter-agent [options]
 ### Model & Provider
 | Flag | Description |
 |------|-------------|
-| `--provider NAME` | `auto`, `apple`, `openrouter`, `openai`, `anthropic`, `cerebras` |
-| `--model NAME` | Model name (e.g. `apple`, `gpt5`, `anthropic/claude-3.5-sonnet`) |
+| `--provider NAME` | `auto`, `mlx`, `openrouter`, `openai`, `anthropic`, `cerebras` |
+| `--model NAME` | Model name (e.g. `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit`) |
 | `--reasoning-effort LEVEL`| `low`, `medium`, `high`, or `none` |
 | `--list-models` | Fetch available models from the provider API |
 
@@ -111,7 +122,7 @@ openplanter-agent [options]
 | Flag | Description |
 |------|-------------|
 | `--task OBJECTIVE` | Run a single task and exit (headless) |
-| `--timeout N` | Shell timeout (Default: 45s, Auto-boosted to 600s for Apple) |
+| `--timeout N` | Shell timeout in seconds (default: 45) |
 | `--recursive` | Enable recursive sub-agent delegation |
 | `--acceptance-criteria` | Judge subtask results with a lightweight model |
 | `--demo` | Censor entity names and workspace paths in output |
@@ -123,7 +134,7 @@ Inside the interactive REPL:
 | Command | Action |
 |---------|--------|
 | `/model` | Show current model and provider |
-| `/model NAME` | Switch model (aliases: `apple`, `opus`, `sonnet`, `Haipa`) |
+| `/model NAME` | Switch model (e.g. `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit`) |
 | `/model NAME --save` | Switch and persist model & provider URL as default |
 | `/model list [all]` | List available models |
 | `/db NAME [--save]` | Quickly set and save the active MariaDB database |
@@ -140,20 +151,18 @@ Inside the interactive REPL:
 
 ```
 agent/
-  appleai/       Compiled local Apple Intelligence bridge binary
   __main__.py    CLI entry point and REPL
   engine.py      Recursive language model engine
   runtime.py     Session persistence and lifecycle
-  model.py       Provider-agnostic LLM abstraction (inc. AppleModel context squeeze)
-  builder.py     Engine/model factory
+  model.py       Provider-agnostic LLM abstraction
+  builder.py     Engine/model factory (MLX auto-discovery)
   tools.py       Workspace tool implementations (inc. MariaDB)
   tool_defs.py   Tool JSON schemas
   prompts.py     System prompt construction
-  config.py      Configuration and Auto-Discovery logic
+  config.py      Configuration and MLX Auto-Discovery logic
   credentials.py Credential management
   tui.py         Rich terminal UI + Slash Commands
   settings.py    Persistent settings (inc. DB & Provider URLs)
-LocalAppleOpenAIServer/  Swift source code for the local bridge
 ```
 
 ## Development
@@ -162,12 +171,17 @@ LocalAppleOpenAIServer/  Swift source code for the local bridge
 # Install in editable mode
 pip install -e .
 
-# Run with local Apple Model
-python3 -m agent --model apple
+# Install MLX for local inference
+pip install mlx-lm
 
-# Rebuild the Swift bridge (requires Xcode 16+)
-cd LocalAppleOpenAIServer && swift build -c release
-cp .build/release/App ../agent/appleai/apple-bridge
+# Run with local MLX model
+python3 -m agent --provider mlx
+
+# Run with a specific MLX model
+python3 -m agent --provider mlx --model mlx-community/Qwen2.5-Coder-14B-Instruct-4bit
+
+# Run with cloud provider
+python3 -m agent --provider anthropic
 ```
 
 ## License
