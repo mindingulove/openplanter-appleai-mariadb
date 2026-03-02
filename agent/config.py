@@ -201,11 +201,11 @@ class AgentConfig:
             def _find_mlx_python() -> Path:
                 """Return a Python executable that has mlx_lm installed."""
                 candidates = [
-                    Path(sys.executable),
                     self.workspace / ".venv" / "bin" / "python3",
                     self.workspace / ".venv" / "bin" / "python",
                     self.workspace / ".venv312" / "bin" / "python3",
                     self.workspace / ".venv312" / "bin" / "python",
+                    Path(sys.executable),
                 ]
                 for candidate in candidates:
                     if not candidate.exists():
