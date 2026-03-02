@@ -12,6 +12,7 @@ import threading
 import urllib.error
 import urllib.request
 import re as _re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -49,7 +50,6 @@ class WorkspaceTools:
         try:
             # 1. Get columns
             describe_res = self.mariadb_query(f"DESCRIBE `{table}`", database=database, format="json")
-            import json
             cols_data = json.loads(describe_res)
             cols = [c["Field"] for c in cols_data]
 
@@ -59,8 +59,8 @@ class WorkspaceTools:
             where_clauses = [f"`{c}` LIKE '%{escaped}%'" for c in cols]
             sql = f"SELECT * FROM `{table}` WHERE {' OR '.join(where_clauses)} LIMIT 20"
             return self.mariadb_query(sql, database=database)
-        except Exception as e:
-            return f"Search failed: {e}"
+        except Exception as exc:
+            return f"Search failed: {exc}"
 
     def mariadb_sample(self, table: str, database: str | None = None) -> str:
         """Quickly see 5 example rows from a table to understand the data format."""
@@ -68,7 +68,6 @@ class WorkspaceTools:
 
     def mariadb_schema(self, database: str | None = None) -> str:
         """Return a full schema map: all tables with columns, types, nullability, and row counts."""
-        from collections import defaultdict
         db_name = database or self.mariadb_database
         try:
             connection = self._get_db_conn(database)
@@ -104,56 +103,98 @@ class WorkspaceTools:
                     lines.append(f"  - {col['COLUMN_NAME']}: {col['COLUMN_TYPE']}{null_flag}{key_flag}")
                 lines.append("")
 
+            # Schema output uses markdown formatting; allow 3× the normal limit so
+            # all tables fit without truncation on typical schemas (50–100 tables).
             return self._clip("\n".join(lines), self.max_shell_output_chars * 3)
         except Exception as exc:
             return f"mariadb_schema failed: {exc}"
 
     def mariadb_stats(self, table: str, database: str | None = None) -> str:
-        """Return per-column statistics: count, nulls, distinct, min/max/avg, top 5 values."""
+        """Return per-column statistics: count, nulls, distinct, min/max/avg, top 5 values.
+
+        Batches COUNT/DISTINCT into one query and MIN/MAX/AVG into one query to avoid N+1.
+        Only low-cardinality (distinct<=20) non-numeric columns run individual GROUP BY queries.
+        """
+        # Numeric base types that support MIN/MAX/AVG. Match on the base type only
+        # (before any "(size)" suffix) to avoid false positives on spatial types like POINT.
+        _NUMERIC_BASE_TYPES = frozenset({
+            "int", "tinyint", "smallint", "mediumint", "bigint",
+            "float", "double", "decimal", "numeric", "real",
+        })
+
         try:
             connection = self._get_db_conn(database)
             with connection.cursor() as cursor:
                 cursor.execute(f"DESCRIBE `{table}`")
                 cols = cursor.fetchall()
 
-            lines = [f"Column statistics for `{table}`:\n"]
+            if not cols:
+                return f"Table `{table}` has no columns."
+
+            # Identify numeric columns by base type (strip size suffix and modifiers).
+            def _is_numeric(col_type: str) -> bool:
+                base = col_type.lower().split("(")[0].split()[0]
+                return base in _NUMERIC_BASE_TYPES
+
+            # Batch 1: COUNT(*), COUNT(col), COUNT(DISTINCT col) for ALL columns in one query.
+            count_parts = ["COUNT(*) as __total"]
+            for col in cols:
+                cn = col["Field"]
+                count_parts.append(f"COUNT(`{cn}`) as `{cn}__nn`")
+                count_parts.append(f"COUNT(DISTINCT `{cn}`) as `{cn}__dc`")
+            with connection.cursor() as cursor:
+                cursor.execute(f"SELECT {', '.join(count_parts)} FROM `{table}`")
+                base_row = cursor.fetchone()
+            total = base_row["__total"]
+
+            # Batch 2: MIN/MAX/AVG for all numeric columns in one query.
+            numeric_cols = [col["Field"] for col in cols if _is_numeric(col["Type"])]
+            num_stats: dict[str, dict] = {}
+            if numeric_cols:
+                num_parts = []
+                for cn in numeric_cols:
+                    num_parts += [
+                        f"MIN(`{cn}`) as `{cn}__min`",
+                        f"MAX(`{cn}`) as `{cn}__max`",
+                        f"ROUND(AVG(`{cn}`), 2) as `{cn}__avg`",
+                    ]
+                with connection.cursor() as cursor:
+                    cursor.execute(f"SELECT {', '.join(num_parts)} FROM `{table}`")
+                    num_row = cursor.fetchone()
+                for cn in numeric_cols:
+                    num_stats[cn] = {
+                        "min": num_row[f"{cn}__min"],
+                        "max": num_row[f"{cn}__max"],
+                        "avg": num_row[f"{cn}__avg"],
+                    }
+
+            # Build output — only low-cardinality non-numeric columns need individual GROUP BY.
+            lines = [f"Column statistics for `{table}` ({total} rows):\n"]
             for col in cols:
                 col_name = col["Field"]
-                col_type = col["Type"].lower()
-                is_numeric = any(
-                    t in col_type
-                    for t in ("int", "float", "double", "decimal", "numeric", "bigint", "tinyint", "smallint", "mediumint")
-                )
-                try:
-                    with connection.cursor() as cursor:
-                        cursor.execute(
-                            f"SELECT COUNT(*) as total, COUNT(`{col_name}`) as non_null, "
-                            f"COUNT(DISTINCT `{col_name}`) as distinct_count FROM `{table}`"
-                        )
-                        base = cursor.fetchone()
-                        stat_parts = [
-                            f"total={base['total']}",
-                            f"nulls={base['total'] - base['non_null']}",
-                            f"distinct={base['distinct_count']}",
-                        ]
-                        if is_numeric and base["non_null"] > 0:
-                            cursor.execute(
-                                f"SELECT MIN(`{col_name}`) as mn, MAX(`{col_name}`) as mx, "
-                                f"ROUND(AVG(`{col_name}`), 2) as avg FROM `{table}`"
-                            )
-                            num = cursor.fetchone()
-                            stat_parts.append(f"min={num['mn']}, max={num['mx']}, avg={num['avg']}")
-                        elif base["distinct_count"] <= 20 and base["non_null"] > 0:
+                non_null = base_row[f"{col_name}__nn"]
+                distinct_count = base_row[f"{col_name}__dc"]
+                stat_parts = [
+                    f"nulls={total - non_null}",
+                    f"distinct={distinct_count}",
+                ]
+                if col_name in num_stats and non_null > 0:
+                    ns = num_stats[col_name]
+                    stat_parts.append(f"min={ns['min']}, max={ns['max']}, avg={ns['avg']}")
+                elif distinct_count <= 20 and non_null > 0:
+                    # Low-cardinality non-numeric: show top 5 most frequent values.
+                    try:
+                        with connection.cursor() as cursor:
                             cursor.execute(
                                 f"SELECT `{col_name}` as val, COUNT(*) as cnt FROM `{table}` "
                                 f"GROUP BY `{col_name}` ORDER BY cnt DESC LIMIT 5"
                             )
                             top = cursor.fetchall()
-                            top_str = ", ".join(f"{r['val']}({r['cnt']})" for r in top)
-                            stat_parts.append(f"top: {top_str}")
-                    lines.append(f"  {col_name} ({col['Type']}): {' | '.join(stat_parts)}")
-                except Exception as col_exc:
-                    lines.append(f"  {col_name}: error — {col_exc}")
+                        top_str = ", ".join(f"{r['val']}({r['cnt']})" for r in top)
+                        stat_parts.append(f"top: {top_str}")
+                    except Exception:
+                        pass
+                lines.append(f"  {col_name} ({col['Type']}): {' | '.join(stat_parts)}")
 
             return "\n".join(lines)
         except Exception as exc:
