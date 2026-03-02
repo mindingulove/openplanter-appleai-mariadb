@@ -3,7 +3,7 @@
 A recursive-language-model investigation agent with a terminal UI. This version is a specialized fork of the original OpenPlanter, enhanced for on-device performance and direct database integration.
 
 ### 🚀 How this fork differs:
-- **Local MLX AI (8K Context):** Native integration with Apple Silicon via `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit`. Run investigations fully local with an **8,192-token context window** — 2× the capacity of the previous Apple Intelligence bridge. The MLX server is auto-discovered or auto-booted with zero config.
+- **Local MLX AI (8K Context):** Native integration with Apple Silicon via `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit`. Run investigations fully local with an **8,192-token context window**. The MLX server is auto-discovered or auto-booted with zero config.
 - **Privacy-First by Default:** No cloud API keys required. All inference runs on-device using your Mac's GPU via the MLX framework.
 - **Direct Database Access:** Built-in support for MariaDB/MySQL. The agent treats your database as a first-class workspace component, autonomously discovering schemas and executing complex analytical queries.
 - **Deep Persistence:** Enhanced `settings.json` that remembers not just models, but custom provider URLs, database credentials, and dynamic port mappings using `{port}` templates.
@@ -50,9 +50,9 @@ OpenPlanter supports running fully local on Apple Silicon using the [MLX](https:
 - **Zero-Config:** No API key required. Just install `mlx-lm` and run with `--provider mlx`.
 - **Auto-Discovery:** Detects any already-running `mlx_lm` server via process scanning.
 - **Auto-Boot:** If no server is found, automatically launches one with the configured model.
-- **8K Context Window:** Uses `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` (~4GB RAM), which supports 8,192 tokens of context — double the previous Apple Intelligence limit.
+- **8K Context Window:** Uses `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` (~4GB RAM), which supports 8,192 tokens of context.
 - **Configurable Model:** Override via `OPENPLANTER_MODEL` or `--model mlx-community/YOUR-MODEL`.
-- **Configurable Tokens:** Set `OPENPLANTER_MLX_MAX_TOKENS` (default: 2048 output tokens per response).
+- **Configurable Tokens:** Set `OPENPLANTER_MLX_MAX_TOKENS` (default: 4096 output tokens per response).
 
 ```bash
 # Use a larger model
