@@ -94,7 +94,7 @@ def _fetch_models_for_provider(cfg: AgentConfig, provider: str) -> list[dict]:
     if provider == "apple":
         return [{"id": "apple-foundation-model"}]
     if provider == "mlx":
-        return [{"id": "Qwen/Qwen2.5-Coder-7B-Instruct"}]
+        return [{"id": PROVIDER_DEFAULT_MODELS["mlx"]}]
     raise ModelError(f"Unknown provider: {provider}")
 
 def _resolve_model_name(cfg: AgentConfig) -> str:
@@ -131,6 +131,8 @@ def build_model_factory(cfg: AgentConfig) -> ModelFactory | None:
                 base_url=cfg.mlx_base_url,
                 reasoning_effort=effort,
                 timeout_sec=cfg.model_timeout_sec,
+                max_tokens=2048,
+                strict_tools=False,
             )
         if provider in ("openai", None) and cfg.openai_api_key:
             return OpenAICompatibleModel(

@@ -158,25 +158,26 @@ class AgentConfig:
             return
             
         import socket
-        def get_free_port():
+
+        def get_free_port() -> int:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(('', 0))
                 return s.getsockname()[1]
-                
-        def check_mlx_port(port):
-            import urllib.request
+
+        def check_mlx_port(port: int) -> bool:
+            """Return True if a TCP listener on *port* is accepting connections."""
             try:
-                req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/models")
-                with urllib.request.urlopen(req, timeout=1) as response:
-                    return response.getcode() == 200
-            except:
+                with socket.create_connection(("127.0.0.1", int(port)), timeout=0.5):
+                    return True
+            except OSError:
                 return False
 
         # First, try to see if ANY mlx server is running by checking process list
         try:
-            import subprocess
             ps_out = subprocess.check_output(["ps", "aux"], text=True)
             for line in ps_out.splitlines():
+                if "ps aux" in line:
+                    continue
                 if "mlx_lm.server" in line or ("mlx_lm" in line and "server" in line):
                     parts = line.split()
                     pid = parts[1]
@@ -197,14 +198,14 @@ class AgentConfig:
         print(f"🛑 Booting MLX Server with {self.model} on port {port}...")
         print("   (Note: If this is the first time, it will download the model from Hugging Face which may take a few minutes.)")
         try:
-            import subprocess
-
             def _find_mlx_python() -> Path:
                 """Return a Python executable that has mlx_lm installed."""
                 candidates = [
                     Path(sys.executable),
                     self.workspace / ".venv" / "bin" / "python3",
+                    self.workspace / ".venv" / "bin" / "python",
                     self.workspace / ".venv312" / "bin" / "python3",
+                    self.workspace / ".venv312" / "bin" / "python",
                 ]
                 for candidate in candidates:
                     if not candidate.exists():
@@ -212,13 +213,14 @@ class AgentConfig:
                     try:
                         result = subprocess.run(
                             [str(candidate), "-c", "import mlx_lm"],
-                            capture_output=True, timeout=5,
+                            capture_output=True, timeout=10,
                         )
                         if result.returncode == 0:
                             return candidate
                     except Exception:
                         pass
-                return Path(sys.executable)  # Fallback; will fail at launch time
+                print(f"⚠️ Could not find a Python with mlx_lm installed. MLX server will likely fail to start.")
+                return Path(sys.executable)
 
             mlx_python = _find_mlx_python()
             decode_concurrency = os.getenv("OPENPLANTER_MLX_DECODE_CONCURRENCY", "2").strip() or "2"
