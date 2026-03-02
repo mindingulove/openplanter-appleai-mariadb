@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import socket
 import requests
 import urllib.error
@@ -96,6 +97,19 @@ def _extract_content(content: object) -> str:
                     text_parts.append(nested)
         return "\n".join(text_parts)
     return ""
+
+
+# Qwen / ChatML special tokens that mlx_lm sometimes leaks into text content.
+# Safe to strip from any provider — OpenAI and Anthropic never emit these.
+_SPECIAL_TOKEN_RE = re.compile(
+    r"<\|im_end\|>|<\|im_start\|>\w*|<\|endoftext\|>|<\|EOT\|>",
+    re.IGNORECASE,
+)
+
+
+def _strip_special_tokens(text: str) -> str:
+    """Remove leaked ChatML / Qwen stop tokens from model text output."""
+    return _SPECIAL_TOKEN_RE.sub("", text).strip()
 
 
 def _http_json(
@@ -715,8 +729,8 @@ class OpenAICompatibleModel:
                     arguments=args if isinstance(args, dict) else {},
                 ))
 
-        # Extract text content
-        text_content = _extract_content(message.get("content", "")) or None
+        # Extract text content; strip leaked Qwen/ChatML stop tokens (no-op for other providers).
+        text_content = _strip_special_tokens(_extract_content(message.get("content", ""))) or None
         if text_content is not None and not text_content.strip():
             text_content = None
 
@@ -847,8 +861,9 @@ class AppleModel(OpenAICompatibleModel):
                     args = {}
                 tool_calls.append(ToolCall(id=tc.get("id", ""), name=func.get("name", ""), arguments=args))
 
-        text_content = _extract_content(message.get("content", "")) or None
-        
+        # Strip leaked Qwen/ChatML stop tokens (no-op for other providers).
+        text_content = _strip_special_tokens(_extract_content(message.get("content", ""))) or None
+
         # Extract usage and active_workers
         usage = parsed.get("usage", {})
         input_tokens = usage.get("prompt_tokens", 0)

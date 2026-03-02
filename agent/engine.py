@@ -323,6 +323,17 @@ class RLMEngine:
             initial_msg_dict["session_id"] = self.session_id
         initial_message = json.dumps(initial_msg_dict, ensure_ascii=True)
 
+        # For MLX with MariaDB active, prepend a short reminder so the DB workflow
+        # instruction isn't buried at the end of the (long) system prompt.
+        if self.config.provider == "mlx" and self.config.mariadb_database and depth == 0:
+            db_reminder = (
+                f"[REMINDER: MariaDB database '{self.config.mariadb_database}' is active. "
+                f"Start with mariadb_schema() to map the full schema in one call, "
+                f"then use mariadb_stats(table) to find correlations. "
+                f"Do NOT start with list_files.]\n\n"
+            )
+            initial_message = db_reminder + initial_message
+
         conversation = model.create_conversation(self.system_prompt, initial_message)
         mlx_restart_attempts = 0
         empty_model_responses = 0
