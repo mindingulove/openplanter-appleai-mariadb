@@ -152,10 +152,26 @@ class AgentConfig:
             self.apple_base_url = self.apple_base_url.replace("{port}", "8080")
             print("⚠️ Discovery failed. Defaulting to 8080.")
 
+    def _get_system_ram_gb(self) -> float:
+        """Return total system RAM in GB."""
+        try:
+            import psutil
+            return psutil.virtual_memory().total / (1024**3)
+        except ImportError:
+            try:
+                # Fallback for macOS if psutil is missing
+                out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True)
+                return int(out.strip()) / (1024**3)
+            except Exception:
+                return 16.0 # Default to 16GB if we can't detect
+
     def discover_mlx_server(self) -> None:
         """Find or start the local MLX server."""
         if self.provider != "mlx":
             return
+            
+        if not self.model:
+            self.model = PROVIDER_DEFAULT_MODELS.get("mlx", "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
             
         import socket
 
@@ -195,7 +211,29 @@ class AgentConfig:
         except: pass
 
         port = get_free_port()
+        
+        # AUTO-CALCULATE MAX TOKENS BASED ON RAM
+        # KV Cache for Qwen2.5-7B is ~0.0625 MB per token.
+        # We target using about 40% of total RAM for the KV cache on M1/M2/M3, 
+        # but always allow at least 32k and cap at 128k.
+        ram_gb = self._get_system_ram_gb()
+        # 40% of RAM / 0.0625 MB per token
+        auto_limit = int((ram_gb * 0.40 * 1024) / 0.0625)
+        # Round to nearest 8k
+        auto_limit = (auto_limit // 8192) * 8192
+        # Safety bounds: Minimum 32k for 8k objectives, Maximum 128k
+        auto_limit = max(32768, min(131072, auto_limit))
+        
+        env_tokens = os.getenv("OPENPLANTER_MLX_MAX_TOKENS")
+        if env_tokens:
+            max_tokens = env_tokens.strip()
+            source_msg = f"Env Override max_tokens: {max_tokens}"
+        else:
+            max_tokens = str(auto_limit)
+            source_msg = f"Auto-calculated max_tokens: {max_tokens}"
+        
         print(f"🛑 Booting MLX Server with {self.model} on port {port}...")
+        print(f"   System RAM: {ram_gb:.1f}GB | {source_msg}")
         print("   (Note: If this is the first time, it will download the model from Hugging Face which may take a few minutes.)")
         try:
             def _find_mlx_python() -> Path:
@@ -223,7 +261,7 @@ class AgentConfig:
             mlx_python = _find_mlx_python()
             decode_concurrency = os.getenv("OPENPLANTER_MLX_DECODE_CONCURRENCY", "2").strip() or "2"
             prompt_concurrency = os.getenv("OPENPLANTER_MLX_PROMPT_CONCURRENCY", "1").strip() or "1"
-            max_tokens = os.getenv("OPENPLANTER_MLX_MAX_TOKENS", "4096").strip() or "4096"
+            
             print(
                 "   MLX launch profile: "
                 f"decode={decode_concurrency}, prompt={prompt_concurrency}, max_tokens={max_tokens}, "

@@ -270,6 +270,49 @@ class HttpStreamSSETests(unittest.TestCase):
         # Should only be called once — no retries on HTTP errors
         self.assertEqual(call_count, 1)
 
+    def test_retries_on_midstream_timeout(self) -> None:
+        call_count = 0
+
+        class MidstreamTimeoutResp:
+            def __init__(self) -> None:
+                self.fp = MagicMock()
+                self.close = MagicMock()
+
+            def __iter__(self):
+                raise TimeoutError("timed out")
+                yield b""  # pragma: no cover
+
+        class GoodResp:
+            def __init__(self) -> None:
+                self.fp = MagicMock()
+                self.close = MagicMock()
+
+            def __iter__(self):
+                data = (
+                    'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
+                    "data: [DONE]\n"
+                )
+                return iter(data.encode().split(b"\n"))
+
+        def fake_urlopen(req, timeout=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return MidstreamTimeoutResp()
+            return GoodResp()
+
+        with patch("agent.model.urllib.request.urlopen", fake_urlopen):
+            events = _http_stream_sse(
+                url="http://test/v1/chat/completions",
+                method="POST",
+                headers={},
+                payload={"model": "test"},
+                first_byte_timeout=1,
+                max_retries=3,
+            )
+        self.assertEqual(call_count, 2)
+        self.assertTrue(len(events) > 0)
+
 
 if __name__ == "__main__":
     unittest.main()

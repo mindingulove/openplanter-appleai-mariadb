@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 import socket
-import requests
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -616,6 +615,45 @@ class OpenAICompatibleModel:
             return True
         return False
 
+    def _extract_tool_calls_from_text(self, text: str) -> list[ToolCall]:
+        """Fallback tool-call extractor for models that output JSON in Markdown or tags."""
+        import uuid
+        calls: list[ToolCall] = []
+        
+        # 1. Look for ```json ... ``` blocks
+        pattern = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+        for match in pattern.finditer(text):
+            content = match.group(1).strip()
+            try:
+                data = json.loads(content)
+                items = data if isinstance(data, list) else [data]
+                for item in items:
+                    if isinstance(item, dict) and "name" in item:
+                        calls.append(ToolCall(
+                            id=item.get("id") or f"ext-{uuid.uuid4().hex[:8]}",
+                            name=item["name"],
+                            arguments=item.get("arguments") or item.get("parameters") or {},
+                        ))
+            except json.JSONDecodeError:
+                continue
+
+        # 2. Look for <tool_call>...</tool_call> tags (Qwen/MLX style)
+        tag_pattern = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
+        for match in tag_pattern.finditer(text):
+            content = match.group(1).strip()
+            try:
+                data = json.loads(content)
+                if isinstance(data, dict) and "name" in data:
+                    calls.append(ToolCall(
+                        id=data.get("id") or f"ext-{uuid.uuid4().hex[:8]}",
+                        name=data["name"],
+                        arguments=data.get("arguments") or data.get("parameters") or {},
+                    ))
+            except json.JSONDecodeError:
+                continue
+        
+        return calls
+
     def create_conversation(self, system_prompt: str, initial_user_message: str) -> Conversation:
         messages: list[Any] = [
             {"role": "system", "content": system_prompt},
@@ -734,6 +772,10 @@ class OpenAICompatibleModel:
         if text_content is not None and not text_content.strip():
             text_content = None
 
+        # Fallback: if no native tool calls, try to extract from text content (e.g. for MLX/Qwen)
+        if not tool_calls and text_content:
+            tool_calls = self._extract_tool_calls_from_text(text_content)
+
         # Extract token usage
         usage = parsed.get("usage", {})
         input_tokens = usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0
@@ -766,25 +808,38 @@ class OpenAICompatibleModel:
                 "content": r.content,
             })
 
-    def condense_conversation(self, conversation: Conversation, keep_recent_turns: int = 4) -> int:
-        """Replace old tool result contents with a short placeholder.
+    def condense_conversation(self, conversation: Conversation, keep_recent_turns: int = 2) -> int:
+        """Replace old conversation history with a short placeholder to save context.
 
-        Returns the number of messages condensed.
+        This version condenses ALL messages (user, assistant, tool) except for the 
+        system prompt and the most recent N turns.
         """
         msgs = conversation._provider_messages
-        # Find indices of tool-role messages.
-        tool_indices = [i for i, m in enumerate(msgs) if isinstance(m, dict) and m.get("role") == "tool"]
-        if len(tool_indices) <= keep_recent_turns:
+        # Turn structure is typically [System, User, Assistant (calls), Tool (result)] * N
+        # We keep System (0) and the last (keep_recent_turns * 3) messages
+        keep_count = (keep_recent_turns * 3)
+        if len(msgs) <= keep_count + 1:
             return 0
-        to_condense = tool_indices[:-keep_recent_turns]
-        condensed = 0
-        placeholder = "[earlier tool output condensed]"
-        for idx in to_condense:
+            
+        to_condense_indices = range(1, len(msgs) - keep_count)
+        condensed_count = 0
+        placeholder = "[earlier conversation condensed to save context window]"
+        
+        for idx in to_condense_indices:
             msg = msgs[idx]
-            if msg.get("content") != placeholder:
-                msg["content"] = placeholder
-                condensed += 1
-        return condensed
+            if not isinstance(msg, dict): continue
+            
+            content = msg.get("content")
+            # Skip if already condensed or if it's already very small
+            if content == placeholder or (isinstance(content, str) and len(content) < 300):
+                continue
+                
+            # For MLX/local models, we just wipe the old content to be safe and fast.
+            # (Summarizing takes another LLM call which might be slow locally).
+            msg["content"] = placeholder
+            condensed_count += 1
+            
+        return condensed_count
 
 
 # ---------------------------------------------------------------------------
@@ -835,9 +890,15 @@ class AppleModel(OpenAICompatibleModel):
         }
 
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=self.timeout_sec)
-            resp.raise_for_status()
-            parsed = resp.json()
+            req = urllib.request.Request(
+                url=url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                parsed = json.loads(raw)
         except Exception as exc:
             raise ModelError(f"Apple Bridge Error: {exc}")
 
@@ -917,15 +978,17 @@ class AppleModel(OpenAICompatibleModel):
                     if "/summarize" not in summarize_url:
                         summarize_url = self.base_url.rstrip("/") + "/summarize"
                     
-                    resp = requests.post(
-                        summarize_url,
-                        json={"text": content},
-                        timeout=self.timeout_sec
+                    req = urllib.request.Request(
+                        url=summarize_url,
+                        data=json.dumps({"text": content}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST"
                     )
-                    if resp.status_code == 200:
-                        msg["content"] = f"[Condensed Summary]: {resp.text.strip()}"
-                    else:
-                        msg["content"] = placeholder
+                    with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+                        if resp.status == 200:
+                            msg["content"] = f"[Condensed Summary]: {resp.read().decode('utf-8').strip()}"
+                        else:
+                            msg["content"] = placeholder
                 except Exception:
                     msg["content"] = placeholder
             else:

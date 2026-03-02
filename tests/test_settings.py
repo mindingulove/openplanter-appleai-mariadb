@@ -3,8 +3,12 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from agent.__main__ import _apply_runtime_overrides, build_parser
 from agent.builder import _validate_model_provider, infer_provider_for_model
+from agent.config import AgentConfig
+from agent.credentials import CredentialBundle
 from agent.model import ModelError
 from agent.settings import PersistentSettings, SettingsStore, normalize_reasoning_effort
 from agent.tui import SLASH_COMMANDS, _compute_suggestions
@@ -66,6 +70,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIsNone(settings.default_model_for_provider("anthropic"))
         self.assertIsNone(settings.default_model_for_provider("openrouter"))
         self.assertIsNone(settings.default_model_for_provider("cerebras"))
+        self.assertIsNone(settings.default_model_for_provider("mlx"))
 
     def test_backward_compat_old_settings(self) -> None:
         """Old settings.json without per-provider keys still loads fine."""
@@ -158,6 +163,9 @@ class InferProviderTests(unittest.TestCase):
         self.assertEqual(infer_provider_for_model("gpt-oss-120b"), "cerebras")
         self.assertEqual(infer_provider_for_model("llama-4-scout-cerebras"), "cerebras")
 
+    def test_mlx_models(self) -> None:
+        self.assertEqual(infer_provider_for_model("Qwen/Qwen2.5-Coder-7B-Instruct"), "mlx")
+
     def test_unknown_returns_none(self) -> None:
         self.assertIsNone(infer_provider_for_model("my-custom-model"))
         self.assertIsNone(infer_provider_for_model("llama-3.1"))
@@ -182,6 +190,23 @@ class ValidateModelProviderTests(unittest.TestCase):
     def test_unknown_model_passes(self) -> None:
         _validate_model_provider("my-custom-model", "openai")
         _validate_model_provider("llama-3.1", "anthropic")
+
+
+class CliParserTests(unittest.TestCase):
+    def test_accepts_mlx_provider(self) -> None:
+        parser = build_parser()
+        parsed = parser.parse_args(["--provider", "mlx", "--task", "test"])
+        self.assertEqual(parsed.provider, "mlx")
+
+    def test_local_provider_boosts_model_timeout(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["--provider", "mlx", "--task", "test"])
+        cfg = AgentConfig(workspace=Path("/tmp"), model_timeout_sec=120)
+        creds = CredentialBundle()
+        with patch.dict("os.environ", {}, clear=False):
+            _apply_runtime_overrides(cfg, args, creds)
+        self.assertEqual(cfg.provider, "mlx")
+        self.assertEqual(cfg.model_timeout_sec, 600)
 
 
 if __name__ == "__main__":

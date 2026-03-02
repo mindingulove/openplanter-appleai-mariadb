@@ -8,7 +8,7 @@ from unittest.mock import patch
 from conftest import _tc
 from agent.config import AgentConfig
 from agent.engine import RLMEngine, ExternalContext
-from agent.model import ModelTurn, ScriptedModel
+from agent.model import Conversation, ModelError, ModelTurn, ScriptedModel
 from agent.tools import WorkspaceTools
 
 
@@ -136,6 +136,61 @@ class EngineComplexTests(unittest.TestCase):
             engine = RLMEngine(model=model, tools=tools, config=cfg)
             result = engine.solve("trigger error")
             self.assertIn("Model error", result)
+
+    def test_mlx_connection_refused_triggers_restart_retry(self) -> None:
+        """MLX connection refused should restart server and retry once."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(
+                workspace=root,
+                provider="mlx",
+                model="Qwen/Qwen2.5-Coder-7B-Instruct",
+                max_depth=1,
+                max_steps_per_call=3,
+            )
+            tools = WorkspaceTools(root=root)
+
+            class FlakyMLXModel:
+                def __init__(self) -> None:
+                    self.model = "Qwen/Qwen2.5-Coder-7B-Instruct"
+                    self.base_url = "http://127.0.0.1:1111/v1"
+                    self.calls = 0
+
+                def create_conversation(self, system_prompt: str, initial_user_message: str) -> Conversation:
+                    return Conversation(
+                        _provider_messages=[{"role": "user", "content": initial_user_message}],
+                        system_prompt=system_prompt,
+                    )
+
+                def complete(self, conversation: Conversation) -> ModelTurn:
+                    self.calls += 1
+                    if self.calls == 1:
+                        raise ModelError("Timed out after 3 attempts calling http://127.0.0.1:1111/v1/chat/completions: <urlopen error [Errno 61] Connection refused>")
+                    return ModelTurn(
+                        text="recovered",
+                        stop_reason="end_turn",
+                        raw_response={"role": "assistant", "content": "recovered"},
+                    )
+
+                def append_assistant_turn(self, conversation: Conversation, turn: ModelTurn) -> None:
+                    conversation._provider_messages.append(turn.raw_response)
+
+                def append_tool_results(self, conversation: Conversation, results):  # noqa: ANN001
+                    return None
+
+            model = FlakyMLXModel()
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+
+            def _fake_restart(self) -> None:  # noqa: ANN001
+                self.mlx_base_url = "http://127.0.0.1:2222/v1"
+
+            with patch.object(AgentConfig, "discover_mlx_server", autospec=True, side_effect=_fake_restart) as restart_mock:
+                result = engine.solve("test mlx restart")
+
+            self.assertEqual(result, "recovered")
+            self.assertEqual(model.calls, 2)
+            self.assertEqual(model.base_url, "http://127.0.0.1:2222/v1")
+            restart_mock.assert_called_once()
 
     # ------------------------------------------------------------------
     # 7. Observation clipping

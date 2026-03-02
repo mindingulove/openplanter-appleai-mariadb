@@ -32,11 +32,13 @@ class PersistentSettings:
     default_model_openrouter: str | None = None
     default_model_cerebras: str | None = None
     default_model_apple: str | None = None
+    default_model_mlx: str | None = None
     openai_base_url: str | None = None
     anthropic_base_url: str | None = None
     openrouter_base_url: str | None = None
     cerebras_base_url: str | None = None
     apple_base_url: str | None = None
+    mlx_base_url: str | None = None
     mariadb_host: str | None = None
     mariadb_port: str | None = None
     mariadb_user: str | None = None
@@ -51,6 +53,7 @@ class PersistentSettings:
             "openrouter": self.default_model_openrouter,
             "cerebras": self.default_model_cerebras,
             "apple": self.default_model_apple,
+            "mlx": self.default_model_mlx,
         }
         specific = per_provider.get(provider)
         if specific:

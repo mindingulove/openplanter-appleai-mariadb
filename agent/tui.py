@@ -125,6 +125,7 @@ MODEL_ALIASES: dict[str, str] = {
     "qwen235b": "qwen-3-235b-a22b-instruct-2507",
     "oss120b": "gpt-oss-120b",
     "apple": "apple-foundation-model",
+    "mlx": "Qwen/Qwen2.5-Coder-7B-Instruct",
 }
 
 
@@ -171,6 +172,7 @@ def _api_key_for_provider(cfg: AgentConfig, provider: str) -> str | None:
         "openrouter": cfg.openrouter_api_key,
         "cerebras": cfg.cerebras_api_key,
         "apple": cfg.apple_api_key,
+        "mlx": cfg.mlx_api_key,
     }.get(provider)
 
 
@@ -187,6 +189,8 @@ def _available_providers(cfg: AgentConfig) -> list[str]:
         providers.append("cerebras")
     if cfg.apple_api_key:
         providers.append("apple")
+    if cfg.mlx_api_key:
+        providers.append("mlx")
     return providers
 
 
@@ -215,7 +219,7 @@ def handle_model_command(args: str, ctx: ChatContext) -> list[str]:
         list_target = parts[1] if len(parts) > 1 else None
         if list_target == "all":
             providers = _available_providers(ctx.cfg)
-        elif list_target in {"openai", "anthropic", "openrouter", "cerebras", "apple"}:
+        elif list_target in {"openai", "anthropic", "openrouter", "cerebras", "apple", "mlx"}:
             providers = [list_target]
         else:
             providers = [ctx.cfg.provider]
@@ -293,6 +297,9 @@ def handle_model_command(args: str, ctx: ChatContext) -> list[str]:
                 settings.apple_base_url = "http://127.0.0.1:{port}/v1"
             else:
                 settings.apple_base_url = ctx.cfg.apple_base_url
+        elif provider == "mlx":
+            settings.default_model_mlx = new_model
+            settings.mlx_base_url = ctx.cfg.mlx_base_url
         
         ctx.settings_store.save(settings)
         lines.append(f"Saved {provider} as your primary default choice.")

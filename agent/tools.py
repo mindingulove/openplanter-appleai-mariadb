@@ -53,10 +53,11 @@ class WorkspaceTools:
             cols_data = json.loads(describe_res)
             cols = [c["Field"] for c in cols_data]
 
-            # 2. Build OR LIKE query with escaped value (prevents SQL injection)
+            # 2. Build OR LIKE query with explicit conversion to prevent collation mismatch
             connection = self._get_db_conn(database)
             escaped = connection.escape_string(query)
-            where_clauses = [f"`{c}` LIKE '%{escaped}%'" for c in cols]
+            # Use CONVERT(... USING utf8mb4) to handle mixed collations (e.g. uca1400 vs unicode_ci)
+            where_clauses = [f"CONVERT(`{c}` USING utf8mb4) LIKE CONVERT('%{escaped}%' USING utf8mb4)" for c in cols]
             sql = f"SELECT * FROM `{table}` WHERE {' OR '.join(where_clauses)} LIMIT 20"
             return self.mariadb_query(sql, database=database)
         except Exception as exc:
@@ -424,8 +425,8 @@ class WorkspaceTools:
         lines: list[str]
         if shutil.which("rg"):
             cmd = ["rg", "--files", "--hidden", "-g", "!.git"]
-            if glob:
-                cmd.extend(["-g", glob])
+            if glob_pat:
+                cmd.extend(["-g", glob_pat])
             try:
                 proc = subprocess.run(
                     cmd,
@@ -448,7 +449,7 @@ class WorkspaceTools:
                     break
                 for fn in filenames:
                     rel = (Path(dirpath) / fn).relative_to(self.root).as_posix()
-                    if glob and not fnmatch.fnmatch(rel, glob):
+                    if glob_pat and not fnmatch.fnmatch(rel, glob_pat):
                         continue
                     lines.append(rel)
         return lines[:max_files]
@@ -493,8 +494,9 @@ class WorkspaceTools:
 
         return "\n".join(render(tree))
 
-    def read_file(self, file_path: str, start_line: int = 1, end_line: int | None = None) -> str:
+    def read_file(self, file_path: str, start_line: int = 1, end_line: int | None = None, hashline: bool = False) -> str:
         """Read a file's content, optionally within a line range."""
+        import hashlib
         p = self._resolve_path(file_path)
         if not p.exists():
             return f"Error: File not found: {file_path}"
@@ -503,7 +505,15 @@ class WorkspaceTools:
             total = len(lines)
             start = max(0, start_line - 1)
             end = min(total, end_line) if end_line else total
-            content = "\n".join(lines[start:end])
+            
+            if hashline:
+                final_lines = []
+                for idx, ln in enumerate(lines[start:end], start + 1):
+                    h = hashlib.md5(ln.encode("utf-8")).hexdigest()
+                    final_lines.append(f"{idx:4} | {h[:8]} | {ln}")
+                content = "\n".join(final_lines)
+            else:
+                content = "\n".join(lines[start:end])
             
             header = f"File {file_path} (lines {start_line}-{end} of {total}):\n"
             return header + self._clip(content, self.max_file_chars)

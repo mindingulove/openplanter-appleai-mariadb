@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import threading
@@ -61,6 +62,7 @@ _MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "gpt-4.1": 1_000_000,
     "gpt-5-turbo-16k": 16_000,
     "apple-foundation-model": 4_000,
+    "qwen": 128_000,
 }
 _DEFAULT_CONTEXT_WINDOW = 128_000
 _CONDENSATION_THRESHOLD = 0.75
@@ -165,6 +167,51 @@ class RLMEngine:
         if hasattr(self.model, "tool_defs"):
             self.model.tool_defs = tool_defs
 
+    def _enable_max_fans(self, on_event: EventCallback | None = None) -> None:
+        """Attempt to set fans to max speed (7000 RPM) on macOS if 'smc' tool is available."""
+        import shutil
+        smc = shutil.which("smc")
+        # Fallback for smcFanControl app bundle on macOS
+        if not smc:
+            candidate = "/Applications/smcFanControl.app/Contents/Resources/smc"
+            if os.path.exists(candidate):
+                smc = candidate
+        
+        if not smc:
+            if on_event: on_event("[system] 'smc' tool not found. Fan control skipped.")
+            return
+        try:
+            # 1. Set fan control to manual (0003 = bits for Fan 0 and Fan 1)
+            res = subprocess.run([smc, "-k", "FS! ", "-w", "0003"], capture_output=True, text=True)
+            if res.returncode != 0:
+                if on_event: on_event(f"[system] fan control failed (check sudo): {res.stderr.strip()}")
+                return
+
+            # 2. Set Target Speeds to 7000 RPM (hex 1B58)
+            subprocess.run([smc, "-k", "F0Tg", "-w", "1B58"], capture_output=True)
+            subprocess.run([smc, "-k", "F1Tg", "-w", "1B58"], capture_output=True)
+            if on_event: on_event("[system] Fans kicked to 7000 RPM.")
+        except Exception as e:
+            if on_event: on_event(f"[system] Fan control error: {e}")
+
+    def _disable_max_fans(self, on_event: EventCallback | None = None) -> None:
+        """Return fans to auto control on macOS."""
+        import shutil
+        smc = shutil.which("smc")
+        if not smc:
+            candidate = "/Applications/smcFanControl.app/Contents/Resources/smc"
+            if os.path.exists(candidate):
+                smc = candidate
+        
+        if not smc:
+            return
+        try:
+            # Set fan control back to auto
+            subprocess.run([smc, "-k", "FS! ", "-w", "0000"], capture_output=True)
+            if on_event: on_event("[system] Fans returned to auto control.")
+        except Exception:
+            pass
+
     def solve(self, objective: str, on_event: EventCallback | None = None) -> str:
         result, _ = self.solve_with_context(objective=objective, on_event=on_event)
         return result
@@ -182,6 +229,10 @@ class RLMEngine:
             return "No objective provided.", context or ExternalContext()
         with self._lock:
             self._shell_command_counts.clear()
+        
+        # Kick fans to max if smc tool is present
+        self._enable_max_fans(on_event=on_event)
+        
         active_context = context if context is not None else ExternalContext()
         deadline = (time.monotonic() + self.config.max_solve_seconds) if self.config.max_solve_seconds > 0 else 0
         try:
@@ -196,6 +247,7 @@ class RLMEngine:
                 replay_logger=replay_logger,
             )
         finally:
+            self._disable_max_fans(on_event=on_event)
             cleanup = getattr(self.tools, "cleanup_bg_jobs", None)
             if cleanup:
                 cleanup()
@@ -216,21 +268,24 @@ class RLMEngine:
         return text[:half] + f"\n\n[... clipped {len(text) - max_chars} chars ...]\n\n" + text[-half:]
 
     def _runtime_policy_check(self, name: str, args: dict[str, Any], depth: int) -> str | None:
-        if name != "run_shell":
-            return None
-        command = str(args.get("command", "")).strip()
-        if not command:
-            return None
-        key = (depth, command)
+        """Block repeated tool calls with identical arguments at the same depth to prevent loops."""
+        # Create a stable key for the tool call
+        try:
+            arg_str = json.dumps(args, sort_keys=True)
+        except Exception:
+            arg_str = str(args)
+            
+        key = (depth, name, arg_str)
         with self._lock:
             count = self._shell_command_counts.get(key, 0) + 1
             self._shell_command_counts[key] = count
-        if count <= 2:
-            return None
-        return (
-            "Blocked by runtime policy: identical run_shell command repeated more than twice "
-            "at the same depth. Change strategy instead of retrying the same command."
-        )
+            
+        if count > 3:
+            return (
+                f"Blocked by runtime policy: identical tool call {name} with arguments {arg_str} "
+                "repeated more than three times at the same depth. Change strategy."
+            )
+        return None
 
     def _judge_result(
         self,
@@ -433,7 +488,14 @@ class RLMEngine:
             # Context condensation
             if turn.input_tokens:
                 model_name = getattr(model, "model", "(unknown)")
+                # Default window for condensation logic.
                 context_window = _MODEL_CONTEXT_WINDOWS.get(model_name, _DEFAULT_CONTEXT_WINDOW)
+                
+                # If the model has a specific max_tokens set (like our 32k for MLX), 
+                # use that as the context window for condensation logic.
+                if hasattr(model, "max_tokens") and model.max_tokens:
+                    context_window = model.max_tokens
+                
                 if turn.input_tokens > _CONDENSATION_THRESHOLD * context_window:
                     condense_fn = getattr(model, "condense_conversation", None)
                     if condense_fn:
@@ -670,6 +732,10 @@ class RLMEngine:
         worker_id: int | None = None,
     ) -> tuple[ToolResult, bool]:
         """Run a single tool call. Returns (ToolResult, is_final)."""
+        # Small breather for local MLX/Apple models to prevent RAM/GPU spikes
+        if self.config.provider in ("mlx", "apple"):
+            time.sleep(0.5)
+
         arg_summary = _summarize_args(tc.arguments)
         self._emit(f"[d{depth}/s{step}] {tc.name}({arg_summary})", on_event)
 
@@ -906,9 +972,15 @@ class RLMEngine:
                 # We reuse the bridge /summarize logic
                 try:
                     s_url = model.base_url.replace("/chat/completions", "/summarize").replace("/v1", "/v1/summarize")
-                    import requests
-                    resp = requests.post(s_url, json={"text": f"Focus on {focus}: {content[:10000]}"}, timeout=60)
-                    return False, f"Distilled Summary of {aid}:\n{resp.text}"
+                    import urllib.request
+                    req = urllib.request.Request(
+                        url=s_url,
+                        data=json.dumps({"text": f"Focus on {focus}: {content[:10000]}"}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req, timeout=60) as resp:
+                        return False, f"Distilled Summary of {aid}:\n{resp.read().decode('utf-8').strip()}"
                 except Exception as e:
                     return False, f"Summarization failed: {e}"
             return False, "Summarization tool not supported by current model provider."
