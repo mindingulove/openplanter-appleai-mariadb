@@ -208,8 +208,6 @@ class AgentConfig:
                     Path(sys.executable),
                 ]
                 for candidate in candidates:
-                    if not candidate.exists():
-                        continue
                     try:
                         result = subprocess.run(
                             [str(candidate), "-c", "import mlx_lm"],
