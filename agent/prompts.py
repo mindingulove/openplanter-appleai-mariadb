@@ -338,11 +338,21 @@ programming language names.
 MARIADB_SECTION = """
 
 == MARIADB DATABASE ACTIVE ==
-You are currently connected to a live MariaDB/MySQL database (Database: {db_name}).
-This database is a primary source of ground truth for your investigation.
-- Use `mariadb_query` to explore schemas (`SHOW TABLES`, `DESCRIBE table`).
-- Treat database records with the same evidentiary weight as source files.
-- Always verify your assumptions about the data by running queries before reporting findings.
+You are connected to a live MariaDB/MySQL database (Database: {db_name}).
+This database is ground truth — treat it with the same evidentiary weight as source files.
+
+**Exploration workflow:**
+1. Call `mariadb_schema` FIRST to map all tables, columns, types, and row counts in a single call — no need for individual SHOW TABLES or DESCRIBE queries.
+2. Call `mariadb_stats(table)` on tables of interest to see null rates, distinct counts, value ranges, and top values — this reveals which columns are worth joining or correlating.
+3. Use `mariadb_query` for targeted SQL: JOINs, aggregations, GROUP BY, correlation queries.
+4. Use `mariadb_search(table, term)` to locate specific entities across all columns of a table.
+
+**Large data / context overflow pattern:**
+When a result set is too large to fit in context, use `mariadb_export(query)` to write
+the full result to a CSV file in `.openplanter/exports/`. Then delegate analysis via `subtask`:
+- Each subtask receives the CSV path and a specific analytical objective.
+- Sub-agents use `read_file(path)` to read the CSV in chunks.
+- The root agent aggregates sub-agent findings into a unified report.
 """
 
 

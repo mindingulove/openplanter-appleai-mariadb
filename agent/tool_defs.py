@@ -441,8 +441,45 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "mariadb_schema",
+        "description": (
+            "Return a full schema map of the database: all tables with column names, types, "
+            "nullability, key flags, and estimated row counts. Call this FIRST before any "
+            "analysis to understand the structure in a single call — no need for individual DESCRIBEs."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "database": {"type": "string", "description": "Optional database name override."},
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "mariadb_stats",
+        "description": (
+            "Return per-column statistics for a table: total rows, null count, distinct count, "
+            "min/max/avg for numeric columns, and top 5 most frequent values for low-cardinality "
+            "text columns. Use this to identify which columns are interesting to join or correlate."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "table": {"type": "string", "description": "The table to analyse."},
+                "database": {"type": "string", "description": "Optional database name override."},
+            },
+            "required": ["table"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "mariadb_export",
-        "description": "Execute a SQL query and save the full result to a temporary artifact. Returns an ID. Use this when you expect a large result set.",
+        "description": (
+            "Execute a SQL query and export the FULL result to a CSV file — bypasses context limits. "
+            "Returns the file path and row count. Use this for large result sets, then delegate "
+            "analysis to subtasks via read_file."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -497,6 +534,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 
 _ARTIFACT_TOOLS = {"list_artifacts", "read_artifact"}
 _DELEGATION_TOOLS = {"subtask", "execute", "list_artifacts", "read_artifact"}
+_MARIADB_TOOLS = {
+    "mariadb_query", "mariadb_search", "mariadb_sample",
+    "mariadb_schema", "mariadb_stats", "mariadb_export", "read_data_chunk",
+}
 
 
 def _strip_acceptance_criteria(defs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -537,7 +578,7 @@ def get_tool_definitions(
         defs += [d for d in TOOL_DEFINITIONS if d["name"] in _ARTIFACT_TOOLS]
 
     if not include_mariadb:
-        defs = [d for d in defs if d["name"] != "mariadb_query"]
+        defs = [d for d in defs if d["name"] not in _MARIADB_TOOLS]
 
     if not include_acceptance_criteria:
         defs = _strip_acceptance_criteria(defs)

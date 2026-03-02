@@ -48,14 +48,16 @@ class WorkspaceTools:
         """Search for a string across ALL columns in a specific table."""
         try:
             # 1. Get columns
-            describe_res = self.mariadb_query(f"DESCRIBE {table}", database=database, format="json")
+            describe_res = self.mariadb_query(f"DESCRIBE `{table}`", database=database, format="json")
             import json
             cols_data = json.loads(describe_res)
-            cols = [c["Field"] for i, c in enumerate(cols_data)]
-            
-            # 2. Build massive OR LIKE query
-            where_clauses = [f"`{c}` LIKE '%{query}%'" for c in cols]
-            sql = f"SELECT * FROM `{table}` WHERE {' OR '.join(where_clauses)} LIMIT 5"
+            cols = [c["Field"] for c in cols_data]
+
+            # 2. Build OR LIKE query with escaped value (prevents SQL injection)
+            connection = self._get_db_conn(database)
+            escaped = connection.escape_string(query)
+            where_clauses = [f"`{c}` LIKE '%{escaped}%'" for c in cols]
+            sql = f"SELECT * FROM `{table}` WHERE {' OR '.join(where_clauses)} LIMIT 20"
             return self.mariadb_query(sql, database=database)
         except Exception as e:
             return f"Search failed: {e}"
@@ -63,6 +65,99 @@ class WorkspaceTools:
     def mariadb_sample(self, table: str, database: str | None = None) -> str:
         """Quickly see 5 example rows from a table to understand the data format."""
         return self.mariadb_query(f"SELECT * FROM `{table}` LIMIT 5", database=database)
+
+    def mariadb_schema(self, database: str | None = None) -> str:
+        """Return a full schema map: all tables with columns, types, nullability, and row counts."""
+        from collections import defaultdict
+        db_name = database or self.mariadb_database
+        try:
+            connection = self._get_db_conn(database)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT TABLE_NAME, TABLE_ROWS "
+                    "FROM information_schema.TABLES "
+                    "WHERE TABLE_SCHEMA = %s ORDER BY TABLE_NAME",
+                    (db_name,),
+                )
+                tables = cursor.fetchall()
+
+                cursor.execute(
+                    "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY "
+                    "FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA = %s ORDER BY TABLE_NAME, ORDINAL_POSITION",
+                    (db_name,),
+                )
+                all_cols = cursor.fetchall()
+
+            cols_by_table: dict[str, list] = defaultdict(list)
+            for col in all_cols:
+                cols_by_table[col["TABLE_NAME"]].append(col)
+
+            lines = [f"Schema for database '{db_name}' ({len(tables)} tables):\n"]
+            for tbl in tables:
+                name = tbl["TABLE_NAME"]
+                rows_est = tbl["TABLE_ROWS"] if tbl["TABLE_ROWS"] is not None else "?"
+                lines.append(f"## {name} (~{rows_est} rows)")
+                for col in cols_by_table.get(name, []):
+                    key_flag = f" [{col['COLUMN_KEY']}]" if col["COLUMN_KEY"] else ""
+                    null_flag = " NULL" if col["IS_NULLABLE"] == "YES" else ""
+                    lines.append(f"  - {col['COLUMN_NAME']}: {col['COLUMN_TYPE']}{null_flag}{key_flag}")
+                lines.append("")
+
+            return self._clip("\n".join(lines), self.max_shell_output_chars * 3)
+        except Exception as exc:
+            return f"mariadb_schema failed: {exc}"
+
+    def mariadb_stats(self, table: str, database: str | None = None) -> str:
+        """Return per-column statistics: count, nulls, distinct, min/max/avg, top 5 values."""
+        try:
+            connection = self._get_db_conn(database)
+            with connection.cursor() as cursor:
+                cursor.execute(f"DESCRIBE `{table}`")
+                cols = cursor.fetchall()
+
+            lines = [f"Column statistics for `{table}`:\n"]
+            for col in cols:
+                col_name = col["Field"]
+                col_type = col["Type"].lower()
+                is_numeric = any(
+                    t in col_type
+                    for t in ("int", "float", "double", "decimal", "numeric", "bigint", "tinyint", "smallint", "mediumint")
+                )
+                try:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            f"SELECT COUNT(*) as total, COUNT(`{col_name}`) as non_null, "
+                            f"COUNT(DISTINCT `{col_name}`) as distinct_count FROM `{table}`"
+                        )
+                        base = cursor.fetchone()
+                        stat_parts = [
+                            f"total={base['total']}",
+                            f"nulls={base['total'] - base['non_null']}",
+                            f"distinct={base['distinct_count']}",
+                        ]
+                        if is_numeric and base["non_null"] > 0:
+                            cursor.execute(
+                                f"SELECT MIN(`{col_name}`) as mn, MAX(`{col_name}`) as mx, "
+                                f"ROUND(AVG(`{col_name}`), 2) as avg FROM `{table}`"
+                            )
+                            num = cursor.fetchone()
+                            stat_parts.append(f"min={num['mn']}, max={num['mx']}, avg={num['avg']}")
+                        elif base["distinct_count"] <= 20 and base["non_null"] > 0:
+                            cursor.execute(
+                                f"SELECT `{col_name}` as val, COUNT(*) as cnt FROM `{table}` "
+                                f"GROUP BY `{col_name}` ORDER BY cnt DESC LIMIT 5"
+                            )
+                            top = cursor.fetchall()
+                            top_str = ", ".join(f"{r['val']}({r['cnt']})" for r in top)
+                            stat_parts.append(f"top: {top_str}")
+                    lines.append(f"  {col_name} ({col['Type']}): {' | '.join(stat_parts)}")
+                except Exception as col_exc:
+                    lines.append(f"  {col_name}: error — {col_exc}")
+
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"mariadb_stats failed: {exc}"
 
     def _get_db_conn(self, database: str | None = None) -> Any:
         import pymysql
@@ -228,34 +323,38 @@ class WorkspaceTools:
             return f"MariaDB Connection Error: {exc}"
 
     def mariadb_export(self, query: str, database: str | None = None) -> str:
-        """Execute a query and save the ENTIRE result to a temporary data artifact.
-        Returns the artifact ID and row count. Use this for large results.
-        """
-        import json
+        """Execute a query and export the FULL result to a CSV file. Returns the file path and row count."""
+        import csv
         import uuid
         try:
-            # We reuse the existing logic but don't format as table
-            # For simplicity in this implementation, I'll assume the user has the mysql client
-            # or we can use the same internal mechanism.
-            raw_data = self.mariadb_query(query, database=database, format="json")
-            if "[... clipped" in raw_data:
-                # If the tool clipped it, we need a way to get the full data.
-                # In a real implementation, we'd bypass the clip.
-                pass 
-
-            artifact_id = f"data_{uuid.uuid4().hex[:8]}"
-            path = self.root / ".openplanter" / "artifacts" / f"{artifact_id}.json"
+            artifact_id = f"export_{uuid.uuid4().hex[:8]}"
+            path = self.root / ".openplanter" / "exports" / f"{artifact_id}.csv"
             path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Note: In a production version, we'd stream this to disk to avoid RAM issues.
-            # Here we just save the raw string.
-            path.write_text(raw_data)
+            connection = self._get_db_conn(database)
+            with connection.cursor() as cursor:
+                cursor.execute(query)
+                rows = cursor.fetchall()
 
-            # Count rows roughly
-            row_count = raw_data.count("\n") - 1
-            return f"Data exported to artifact '{artifact_id}' ({row_count} rows). Use 'read_data_chunk' to inspect."
-        except Exception as e:
-            return f"Export failed: {e}"
+            if not rows:
+                return "(no results — nothing exported)"
+
+            headers = list(rows[0].keys())
+            row_count = 0
+            with path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=headers)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({k: "" if v is None else str(v) for k, v in row.items()})
+                    row_count += 1
+
+            rel_path = str(path.relative_to(self.root))
+            return (
+                f"Exported {row_count} rows to '{rel_path}'.\n"
+                f"Use read_file('{rel_path}') to inspect, or delegate to a subtask for analysis."
+            )
+        except Exception as exc:
+            return f"Export failed: {exc}"
 
     def read_data_chunk(self, artifact_id: str, offset: int = 0, limit: int = 50) -> str:
         """Read a specific range of rows from a data artifact."""

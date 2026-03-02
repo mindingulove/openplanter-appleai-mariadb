@@ -158,8 +158,7 @@ class RLMEngine:
         if is_apple:
             self.config.max_steps_per_call = 60
             essential_tools = {
-                "mariadb_query", "mariadb_search", "mariadb_sample",
-                "think", "read_file"
+                "mariadb_query", "mariadb_sample"
             }
             tool_defs = [d for d in tool_defs if d["name"] in essential_tools]
             
@@ -325,6 +324,8 @@ class RLMEngine:
         initial_message = json.dumps(initial_msg_dict, ensure_ascii=True)
 
         conversation = model.create_conversation(self.system_prompt, initial_message)
+        mlx_restart_attempts = 0
+        empty_model_responses = 0
 
         if replay_logger and replay_logger._seq == 0:
             replay_logger.write_header(
@@ -351,7 +352,27 @@ class RLMEngine:
             except ModelError as exc:
                 # SPECIAL HANDLING FOR LOCAL APPLE MODEL CONTEXT ERRORS
                 err_str = str(exc).lower()
-                if "context window" in err_str or "context size" in err_str:
+                is_mlx_refused = (
+                    self.config.provider == "mlx"
+                    and ("connection refused" in err_str or "failed to establish a new connection" in err_str)
+                )
+                if is_mlx_refused:
+                    if mlx_restart_attempts >= 1:
+                        return (
+                            "MLX server became unreachable repeatedly and appears unstable on this runtime. "
+                            "Try a smaller model and Python 3.12, or switch provider."
+                        )
+                    self._emit(f"[d{depth}/s{step}] mlx server unreachable, attempting restart...", on_event)
+                    try:
+                        self.config.discover_mlx_server()
+                        if hasattr(model, "base_url"):
+                            model.base_url = self.config.mlx_base_url
+                        mlx_restart_attempts += 1
+                        turn = model.complete(conversation)
+                    except ModelError as retry_exc:
+                        self._emit(f"[d{depth}/s{step}] mlx restart retry failed: {retry_exc}", on_event)
+                        return f"Model error at depth {depth}, step {step}: {retry_exc}"
+                elif "context window" in err_str or "context size" in err_str:
                     self._emit(f"[d{depth}/s{step}] context overflow detected, pre-emptive condensation...", on_event)
                     condense_fn = getattr(model, "condense_conversation", None)
                     if condense_fn:
@@ -454,6 +475,12 @@ class RLMEngine:
 
             # No tool calls and no text = unexpected empty response
             if not turn.tool_calls:
+                empty_model_responses += 1
+                if self.config.provider == "mlx" and empty_model_responses >= 2:
+                    return (
+                        "MLX returned empty responses repeatedly. This usually indicates runtime instability "
+                        "(often Metal/driver/model pressure). Try a smaller model or another provider."
+                    )
                 self._emit(f"[d{depth}/s{step}] empty model response ({elapsed:.1f}s), nudging...", on_event)
                 empty_result = ToolResult(
                     tool_call_id="empty",
@@ -462,6 +489,9 @@ class RLMEngine:
                 )
                 model.append_tool_results(conversation, [empty_result])
                 continue
+
+            # Got a non-empty turn; reset empty-response counter.
+            empty_model_responses = 0
 
             # Log tool calls from model
             tc_names = [tc.name for tc in turn.tool_calls]
@@ -833,6 +863,17 @@ class RLMEngine:
                 return False, "mariadb_export requires query"
             db_override = args.get("database")
             return False, self.tools.mariadb_export(query, database=str(db_override) if db_override else None)
+
+        if name == "mariadb_schema":
+            db_override = args.get("database")
+            return False, self.tools.mariadb_schema(database=str(db_override) if db_override else None)
+
+        if name == "mariadb_stats":
+            table = str(args.get("table", "")).strip()
+            if not table:
+                return False, "mariadb_stats requires table"
+            db_override = args.get("database")
+            return False, self.tools.mariadb_stats(table, database=str(db_override) if db_override else None)
 
         if name == "read_data_chunk":
             aid = str(args.get("artifact_id", "")).strip()
